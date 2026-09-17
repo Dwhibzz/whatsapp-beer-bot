@@ -16,7 +16,7 @@ const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
 let beerGroupId = null;
 let db;
 
-// --- AI VISION VERIFICATION WITH DETAILED RULES ---
+// --- AI VISION VERIFICATION ---
 async function verifyBeerImage(mediaBuffer, mimeType) {
     try {
         const response = await ai.models.generateContent({
@@ -59,7 +59,7 @@ function isPeakWindow() {
     if (day === 4 && hour >= 17) return true;  // Thursday 5:00 PM - 11:59 PM
     if (day === 5) return true;                 // Friday all day
     if (day === 6) return true;                 // Saturday all day
-    if (day === 0 && hour < 20) return true;    // Sunday 12:00 AM - 7:59 PM (Closes at 8 PM)
+    if (day === 0 && hour < 20) return true;    // Sunday 12:00 AM - 7:59 PM
     
     return false;
 }
@@ -88,7 +88,7 @@ function getDaysUntilNextQuarter() {
     return Math.ceil(diffTime / (1000 * 60 * 60 * 24));
 }
 
-// --- CARD & KICK HANDLER (iPhone Formatting Optimized) ---
+// --- CARD & KICK HANDLER ---
 async function handleViolation(chat, msg, senderId, violationType = 'STANDARD') {
     if (violationType === 'NON_ALCOHOLIC_DRINK') {
         await db.run(`UPDATE users SET violations = 2, is_banned = 1 WHERE user_id = ?`, [senderId]);
@@ -147,10 +147,11 @@ async function handleViolation(chat, msg, senderId, violationType = 'STANDARD') 
     }
 }
 
-// --- INITIALIZE WHATSAPP CLIENT (WITH RAM OPTIMIZATIONS) ---
+// --- INITIALIZE WHATSAPP CLIENT ---
 const client = new Client({
     authStrategy: new LocalAuth(),
     puppeteer: {
+        executablePath: process.env.PUPPETEER_EXECUTABLE_PATH || null,
         args: [
             '--no-sandbox',
             '--disable-setuid-sandbox',
@@ -160,8 +161,23 @@ const client = new Client({
             '--no-zygote',
             '--single-process',
             '--disable-gpu',
-            '--js-flags=--max-old-space-size=256'
+            '--js-flags=--expose-gc --max-old-space-size=256'
         ]
+    }
+});
+
+// Intercept Puppeteer requests to block non-essential media inside the browser
+client.on('loading_screen', (percent, message) => {
+    if (client.pupPage) {
+        client.pupPage.setRequestInterception(true);
+        client.pupPage.on('request', (req) => {
+            const resourceType = req.resourceType();
+            if (['image', 'stylesheet', 'font', 'media'].includes(resourceType)) {
+                req.abort();
+            } else {
+                req.continue();
+            }
+        });
     }
 });
 
@@ -174,7 +190,6 @@ client.on('ready', async () => {
     console.log('🍺 Beer Bot is online!');
     db = await initDb();
 
-    // 5-second safe delay for WhatsApp Web internal chat synchronization
     setTimeout(async () => {
         try {
             const chats = await client.getChats();
@@ -191,7 +206,7 @@ client.on('ready', async () => {
         }
     }, 5000);
 
-    // --- CRON 1: WEEKLY SUNDAY 8:00 PM UK REPORT ---
+    // CRON 1: Weekly Sunday 8:00 PM UK Report
     cron.schedule('0 20 * * 0', async () => {
         if (!beerGroupId) return;
 
@@ -240,7 +255,7 @@ client.on('ready', async () => {
         timezone: "Europe/London"
     });
 
-    // --- CRON 2: QUARTERLY PROFILE PHOTO VOTE ANNOUNCEMENT (Jan 1, Apr 1, Jul 1, Oct 1 at 9:00 AM UK) ---
+    // CRON 2: Quarterly Profile Photo Vote Announcement
     cron.schedule('0 9 1 1,4,7,10 *', async () => {
         if (!beerGroupId) return;
 
@@ -276,15 +291,13 @@ client.on('message', async (msg) => {
     if (!chat.isGroup || chat.id._serialized !== beerGroupId) return;
 
     const senderId = msg.author || msg.from;
-
     const participant = chat.participants.find(p => p.id._serialized === senderId);
     const isAdmin = participant && (participant.isAdmin || participant.isSuperAdmin);
 
-    if (isAdmin && !msg.body.startsWith('!')) {
-        return;
-    }
-
+    // --- ADMIN COMMANDS ---
     if (msg.body.startsWith('!revert') || msg.body.startsWith('!var')) {
+        if (!isAdmin) return; // Restrict command to admins
+
         const mentionedContacts = await msg.getMentions();
         if (mentionedContacts.length === 0) {
             await msg.reply('⚠️ Please mention the user to revert! Example: `!revert @user`');
@@ -323,6 +336,8 @@ client.on('message', async (msg) => {
     }
 
     if (msg.body.startsWith('!red') || msg.body.startsWith('!straightred')) {
+        if (!isAdmin) return; // Restrict command to admins
+
         const mentionedContacts = await msg.getMentions();
         if (mentionedContacts.length === 0) {
             await msg.reply('⚠️ Please mention the user to red card! Example: `!red @user`');
@@ -350,6 +365,10 @@ client.on('message', async (msg) => {
         return;
     }
 
+    // Bypass normal check for non-command messages from admins
+    if (isAdmin) return;
+
+    // --- REGULAR USER CHECKING ---
     const contact = await msg.getContact();
     const userName = contact.pushname || contact.name || 'Unknown User';
 
@@ -380,10 +399,10 @@ client.on('message', async (msg) => {
         return;
     }
 
-    const todayStr = new Date().toISOString().split('T')[0];
+    const todayStr = new Date().toLocaleDateString("en-CA", { timeZone: "Europe/London" }); // YYYY-MM-DD
     const yesterday = new Date();
     yesterday.setDate(yesterday.getDate() - 1);
-    const yesterdayStr = yesterday.toISOString().split('T')[0];
+    const yesterdayStr = yesterday.toLocaleDateString("en-CA", { timeZone: "Europe/London" });
 
     let newStreak = 1;
     if (user.last_post_date === yesterdayStr) {
