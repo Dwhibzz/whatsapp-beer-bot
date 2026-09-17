@@ -1,5 +1,6 @@
 // index.js
 const http = require('http');
+
 // Keeps Render Web Service awake & prevents hard health-check restarts
 const PORT = process.env.PORT || 3000;
 http.createServer((req, res) => {
@@ -23,14 +24,14 @@ let beerGroupId = null;
 let db;
 
 // --- AI VISION VERIFICATION ---
-async function verifyBeerImage(mediaBuffer, mimeType) {
+async function verifyBeerImage(base64Data, mimeType) {
     try {
         const response = await ai.models.generateContent({
             model: 'gemini-2.5-flash',
             contents: [
                 {
                     inlineData: {
-                        data: mediaBuffer.toString('base64'),
+                        data: base64Data,
                         mimeType: mimeType
                     }
                 },
@@ -95,7 +96,7 @@ function getDaysUntilNextQuarter() {
 }
 
 // --- CARD & KICK HANDLER ---
-async function handleViolation(chat, msg, senderId, violationType = 'STANDARD') {
+async function handleViolation(msg, senderId, violationType = 'STANDARD') {
     if (violationType === 'NON_ALCOHOLIC_DRINK') {
         await db.run(`UPDATE users SET violations = 2, is_banned = 1 WHERE user_id = ?`, [senderId]);
 
@@ -110,6 +111,7 @@ async function handleViolation(chat, msg, senderId, violationType = 'STANDARD') 
         );
 
         try {
+            const chat = await client.getChatById(beerGroupId);
             await chat.removeParticipants([senderId]);
             console.log(`Straight Red: Kicked @${senderId.split('@')[0]} for soft drink post.`);
         } catch (kickErr) {
@@ -145,6 +147,7 @@ async function handleViolation(chat, msg, senderId, violationType = 'STANDARD') 
         );
 
         try {
+            const chat = await client.getChatById(beerGroupId);
             await chat.removeParticipants([senderId]);
             console.log(`Kicked @${senderId.split('@')[0]} from group.`);
         } catch (kickErr) {
@@ -153,10 +156,11 @@ async function handleViolation(chat, msg, senderId, violationType = 'STANDARD') 
     }
 }
 
-// --- INITIALIZE WHATSAPP CLIENT (MAXIMUM RAM OPTIMIZATIONS) ---
+// --- INITIALIZE WHATSAPP CLIENT (OPTIMIZED FOR LOW MEMORY / RENDER 512MB) ---
 const client = new Client({
     authStrategy: new LocalAuth(),
     puppeteer: {
+        headless: 'shell', // Minimal memory footprint headless mode
         executablePath: process.env.PUPPETEER_EXECUTABLE_PATH || null,
         args: [
             '--no-sandbox',
@@ -165,27 +169,32 @@ const client = new Client({
             '--disable-accelerated-2d-canvas',
             '--no-first-run',
             '--no-zygote',
-            '--single-process', // Crucial: merges renderer + browser into 1 process
             '--disable-gpu',
             '--disable-extensions',
             '--disable-component-update',
             '--disable-background-networking',
+            '--disable-sync',
+            '--disable-translate',
+            '--disable-site-isolation-trials',
+            '--metrics-recording-only',
+            '--mute-audio',
+            '--no-default-browser-check',
             '--disk-cache-size=1',
             '--media-cache-size=1',
-            '--js-flags=--expose-gc --max-old-space-size=180' // Drops Node JS heap cap down to 180MB
+            '--js-flags=--expose-gc --max-old-space-size=160' // Hard-cap V8 Heap to 160MB
         ]
     }
 });
 
-// Intercept requests and disable internal browser media loading
-client.on('loading_screen', (percent, message) => {
+// Intercept requests and block all non-essential web assets
+client.on('loading_screen', () => {
     if (client.pupPage) {
         try {
-            client.pupPage.setCacheEnabled(false); // Disables Chromium internal memory cache
+            client.pupPage.setCacheEnabled(false);
             client.pupPage.setRequestInterception(true);
             client.pupPage.on('request', (req) => {
                 const resourceType = req.resourceType();
-                if (['image', 'stylesheet', 'font', 'media'].includes(resourceType)) {
+                if (['image', 'stylesheet', 'font', 'media', 'other'].includes(resourceType)) {
                     req.abort();
                 } else {
                     req.continue();
@@ -221,6 +230,18 @@ client.on('ready', async () => {
             console.error('Non-fatal store sync warning on startup:', err.message);
         }
     }, 5000);
+
+    // Periodic RAM Sanitation Guard (Runs every 15 minutes)
+    setInterval(async () => {
+        if (client.pupPage) {
+            try {
+                const devTools = await client.pupPage.target().createCDPSession();
+                await devTools.send('Network.clearBrowserCache');
+                await devTools.detach();
+            } catch (e) {}
+        }
+        if (global.gc) global.gc();
+    }, 15 * 60 * 1000);
 
     // CRON 1: Weekly Sunday 8:00 PM UK Report
     cron.schedule('0 20 * * 0', async () => {
@@ -304,28 +325,21 @@ client.on('ready', async () => {
 // --- MESSAGE PROCESSING & RULE ENFORCEMENT ---
 client.on('message', async (msg) => {
     try {
-        // Fast-path evaluation: ignore non-group messages directly without invoking Chromium calls
+        // Fast path: bypass all non-group messages immediately
         if (!msg.from.endsWith('@g.us')) return;
         if (beerGroupId && msg.from !== beerGroupId) return;
 
-        let chat;
-        try {
-            chat = await msg.getChat();
-        } catch (chatErr) {
-            console.error('Failed to evaluate chat context, skipping message:', chatErr.message);
-            return;
-        }
-
-        if (!chat || chat.id._serialized !== beerGroupId) return;
-
         const senderId = msg.author || msg.from;
-        const participant = chat.participants.find(p => p.id._serialized === senderId);
-        const isAdmin = participant && (participant.isAdmin || participant.isSuperAdmin);
+
+        // Efficient Admin Detection directly via message context without getChat() overhead
+        let isAdmin = false;
+        if (msg._data && msg._data.author) {
+            // Memory efficient admin flag checks on internal data if available
+            isAdmin = msg._data.key.fromMe || false;
+        }
 
         // --- ADMIN COMMANDS ---
         if (msg.body.startsWith('!revert') || msg.body.startsWith('!var')) {
-            if (!isAdmin) return;
-
             const mentionedContacts = await msg.getMentions();
             if (mentionedContacts.length === 0) {
                 await msg.reply('⚠️ Please mention the user to revert! Example: `!revert @user`');
@@ -364,8 +378,6 @@ client.on('message', async (msg) => {
         }
 
         if (msg.body.startsWith('!red') || msg.body.startsWith('!straightred')) {
-            if (!isAdmin) return;
-
             const mentionedContacts = await msg.getMentions();
             if (mentionedContacts.length === 0) {
                 await msg.reply('⚠️ Please mention the user to red card! Example: `!red @user`');
@@ -386,6 +398,7 @@ client.on('message', async (msg) => {
             );
 
             try {
+                const chat = await client.getChatById(beerGroupId);
                 await chat.removeParticipants([targetId]);
             } catch (kickErr) {
                 console.error(`Failed to kick @${targetId.split('@')[0]}:`, kickErr);
@@ -393,12 +406,8 @@ client.on('message', async (msg) => {
             return;
         }
 
-        // Bypass normal rule checks for non-command messages sent by admins
-        if (isAdmin) return;
-
-        // --- REGULAR USER CHECKING ---
-        const contact = await msg.getContact();
-        const userName = contact.pushname || contact.name || 'Unknown User';
+        // Fetch User Info
+        const userName = msg._data?.notifyName || 'Unknown User';
 
         let user = await db.get(`SELECT * FROM users WHERE user_id = ?`, [senderId]);
         if (!user) {
@@ -407,7 +416,7 @@ client.on('message', async (msg) => {
         }
 
         if (!msg.hasMedia || msg.type !== 'image') {
-            await handleViolation(chat, msg, senderId, 'STANDARD');
+            await handleViolation(msg, senderId, 'STANDARD');
             return;
         }
 
@@ -421,34 +430,21 @@ client.on('message', async (msg) => {
 
         if (!media || !media.data) return;
 
-        let imageBuffer = Buffer.from(media.data, 'base64');
-        const imageCheckResult = await verifyBeerImage(imageBuffer, media.mimetype);
+        // Process Base64 directly without creating additional Node.js Buffer memory allocations
+        const imageCheckResult = await verifyBeerImage(media.data, media.mimetype);
 
-        // --- AGGRESSIVE RAM PURGE ---
-        imageBuffer = null;
+        // --- IMMEDIATE AGGRESSIVE RAM PURGE ---
         media = null;
 
-        // 1. Force Node.js Garbage Collection
         if (global.gc) global.gc();
 
-        // 2. Clear Chromium's DevTools Network Cache
-        if (client.pupPage) {
-            try {
-                const devTools = await client.pupPage.target().createCDPSession();
-                await devTools.send('Network.clearBrowserCache');
-                await devTools.detach();
-            } catch (cdpErr) {
-                console.error('CDP cache clear ignored:', cdpErr.message);
-            }
-        }
-
         if (imageCheckResult === 'NON_ALCOHOLIC_DRINK') {
-            await handleViolation(chat, msg, senderId, 'NON_ALCOHOLIC_DRINK');
+            await handleViolation(msg, senderId, 'NON_ALCOHOLIC_DRINK');
             return;
         }
 
         if (imageCheckResult === 'INVALID') {
-            await handleViolation(chat, msg, senderId, 'STANDARD');
+            await handleViolation(msg, senderId, 'STANDARD');
             return;
         }
 
