@@ -148,9 +148,12 @@ async function handleViolation(chat, msg, senderId, violationType = 'STANDARD') 
 }
 
 // --- INITIALIZE WHATSAPP CLIENT ---
+const puppeteer = require('puppeteer');
+
 const client = new Client({
     authStrategy: new LocalAuth(),
     puppeteer: {
+        executablePath: puppeteer.executablePath(),
         args: ['--no-sandbox', '--disable-setuid-sandbox']
     }
 });
