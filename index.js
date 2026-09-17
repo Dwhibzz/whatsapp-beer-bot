@@ -169,7 +169,7 @@ const client = new Client({
             '--disable-gpu',
             '--disk-cache-size=1', // Minimizes Chrome disk/RAM cache
             '--media-cache-size=1',
-            '--js-flags=--expose-gc --max-old-space-size=256'
+            '--js-flags=--expose-gc --max-old-space-size=450'
         ]
     }
 });
