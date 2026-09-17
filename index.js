@@ -1,7 +1,7 @@
 // index.js
 const http = require('http');
 
-// Keeps Render Web Service awake & prevents hard health-check restarts
+// Keeps Web Service awake & provides health check
 const PORT = process.env.PORT || 3000;
 http.createServer((req, res) => {
     res.writeHead(200, { 'Content-Type': 'text/plain' });
@@ -111,7 +111,7 @@ async function handleViolation(msg, senderId, violationType = 'STANDARD') {
         );
 
         try {
-            const chat = await client.getChatById(beerGroupId);
+            const chat = await msg.getChat();
             await chat.removeParticipants([senderId]);
             console.log(`Straight Red: Kicked @${senderId.split('@')[0]} for soft drink post.`);
         } catch (kickErr) {
@@ -147,7 +147,7 @@ async function handleViolation(msg, senderId, violationType = 'STANDARD') {
         );
 
         try {
-            const chat = await client.getChatById(beerGroupId);
+            const chat = await msg.getChat();
             await chat.removeParticipants([senderId]);
             console.log(`Kicked @${senderId.split('@')[0]} from group.`);
         } catch (kickErr) {
@@ -156,11 +156,11 @@ async function handleViolation(msg, senderId, violationType = 'STANDARD') {
     }
 }
 
-// --- INITIALIZE WHATSAPP CLIENT (OPTIMIZED FOR LOW MEMORY / RENDER 512MB) ---
+// --- INITIALIZE WHATSAPP CLIENT (OPTIMIZED FOR RAILWAY PERSISTENT VOLUMES) ---
 const client = new Client({
-    authStrategy: new LocalAuth(),
+    authStrategy: new LocalAuth({ dataPath: '/app/.wwebjs_auth' }),
     puppeteer: {
-        headless: 'shell', // Minimal memory footprint headless mode
+        headless: 'shell',
         executablePath: process.env.PUPPETEER_EXECUTABLE_PATH || null,
         args: [
             '--no-sandbox',
@@ -181,7 +181,7 @@ const client = new Client({
             '--no-default-browser-check',
             '--disk-cache-size=1',
             '--media-cache-size=1',
-            '--js-flags=--expose-gc --max-old-space-size=160' // Hard-cap V8 Heap to 160MB
+            '--js-flags=--expose-gc --max-old-space-size=256'
         ]
     }
 });
@@ -215,22 +215,6 @@ client.on('ready', async () => {
     console.log('🍺 Beer Bot is online!');
     db = await initDb();
 
-    setTimeout(async () => {
-        try {
-            const chats = await client.getChats();
-            const group = chats.find(c => c.isGroup && c.name === TARGET_GROUP_NAME);
-
-            if (group) {
-                beerGroupId = group.id._serialized;
-                console.log(`Connected to group: "${TARGET_GROUP_NAME}" (${beerGroupId})`);
-            } else {
-                console.error(`Group "${TARGET_GROUP_NAME}" not found. Ensure the bot is added!`);
-            }
-        } catch (err) {
-            console.error('Non-fatal store sync warning on startup:', err.message);
-        }
-    }, 5000);
-
     // Periodic RAM Sanitation Guard (Runs every 15 minutes)
     setInterval(async () => {
         if (client.pupPage) {
@@ -245,10 +229,11 @@ client.on('ready', async () => {
 
     // CRON 1: Weekly Sunday 8:00 PM UK Report
     cron.schedule('0 20 * * 0', async () => {
-        if (!beerGroupId) return;
-
         try {
-            const targetChat = await client.getChatById(beerGroupId);
+            const chats = await client.getChats();
+            const targetChat = chats.find(c => c.isGroup && c.name === TARGET_GROUP_NAME);
+            if (!targetChat) return;
+
             const totalRow = await db.get(`SELECT value FROM system_stats WHERE key = 'total_beers'`);
             const peakRow = await db.get(`SELECT value FROM system_stats WHERE key = 'peak_window_beers'`);
             
@@ -294,10 +279,11 @@ client.on('ready', async () => {
 
     // CRON 2: Quarterly Profile Photo Vote Announcement
     cron.schedule('0 9 1 1,4,7,10 *', async () => {
-        if (!beerGroupId) return;
-
         try {
-            const targetChat = await client.getChatById(beerGroupId);
+            const chats = await client.getChats();
+            const targetChat = chats.find(c => c.isGroup && c.name === TARGET_GROUP_NAME);
+            if (!targetChat) return;
+
             const admins = targetChat.participants.filter(p => p.isAdmin || p.isSuperAdmin);
             const adminMentions = admins.map(a => a.id._serialized);
 
@@ -325,21 +311,22 @@ client.on('ready', async () => {
 // --- MESSAGE PROCESSING & RULE ENFORCEMENT ---
 client.on('message', async (msg) => {
     try {
-        // Fast path: bypass all non-group messages immediately
-        if (!msg.from.endsWith('@g.us')) return;
-        if (beerGroupId && msg.from !== beerGroupId) return;
+        const chat = await msg.getChat();
+
+        // Dynamic Group Match - ignores messages outside the specified group
+        if (!chat.isGroup || chat.name !== TARGET_GROUP_NAME) return;
 
         const senderId = msg.author || msg.from;
 
-        // Efficient Admin Detection directly via message context without getChat() overhead
-        let isAdmin = false;
-        if (msg._data && msg._data.author) {
-            // Memory efficient admin flag checks on internal data if available
-            isAdmin = msg._data.key.fromMe || false;
-        }
+        // Admin Detection
+        const isGroupAdmin = chat.participants.some(
+            p => p.id._serialized === senderId && (p.isAdmin || p.isSuperAdmin)
+        );
 
         // --- ADMIN COMMANDS ---
         if (msg.body.startsWith('!revert') || msg.body.startsWith('!var')) {
+            if (!isGroupAdmin) return;
+            
             const mentionedContacts = await msg.getMentions();
             if (mentionedContacts.length === 0) {
                 await msg.reply('⚠️ Please mention the user to revert! Example: `!revert @user`');
@@ -378,6 +365,8 @@ client.on('message', async (msg) => {
         }
 
         if (msg.body.startsWith('!red') || msg.body.startsWith('!straightred')) {
+            if (!isGroupAdmin) return;
+
             const mentionedContacts = await msg.getMentions();
             if (mentionedContacts.length === 0) {
                 await msg.reply('⚠️ Please mention the user to red card! Example: `!red @user`');
@@ -398,7 +387,6 @@ client.on('message', async (msg) => {
             );
 
             try {
-                const chat = await client.getChatById(beerGroupId);
                 await chat.removeParticipants([targetId]);
             } catch (kickErr) {
                 console.error(`Failed to kick @${targetId.split('@')[0]}:`, kickErr);
@@ -406,18 +394,20 @@ client.on('message', async (msg) => {
             return;
         }
 
-        // Fetch User Info
-        const userName = msg._data?.notifyName || 'Unknown User';
+        // Skip rule checks for admins so they aren't penalized
+        if (isGroupAdmin) return;
 
+        // Skip regular chat messages (only evaluate image/media posts)
+        if (!msg.hasMedia || (msg.type !== 'image' && msg.type !== 'sticker')) {
+            return;
+        }
+
+        // Fetch / Register User
+        const userName = msg._data?.notifyName || 'Unknown User';
         let user = await db.get(`SELECT * FROM users WHERE user_id = ?`, [senderId]);
         if (!user) {
             await db.run(`INSERT INTO users (user_id, name) VALUES (?, ?)`, [senderId, userName]);
             user = await db.get(`SELECT * FROM users WHERE user_id = ?`, [senderId]);
-        }
-
-        if (!msg.hasMedia || msg.type !== 'image') {
-            await handleViolation(msg, senderId, 'STANDARD');
-            return;
         }
 
         let media;
@@ -430,12 +420,11 @@ client.on('message', async (msg) => {
 
         if (!media || !media.data) return;
 
-        // Process Base64 directly without creating additional Node.js Buffer memory allocations
+        // Verify image with Gemini AI
         const imageCheckResult = await verifyBeerImage(media.data, media.mimetype);
 
-        // --- IMMEDIATE AGGRESSIVE RAM PURGE ---
+        // Immediate RAM Purge
         media = null;
-
         if (global.gc) global.gc();
 
         if (imageCheckResult === 'NON_ALCOHOLIC_DRINK') {
@@ -448,7 +437,8 @@ client.on('message', async (msg) => {
             return;
         }
 
-        const todayStr = new Date().toLocaleDateString("en-CA", { timeZone: "Europe/London" }); // YYYY-MM-DD
+        // Valid Beer Post - Track Streak and Stats
+        const todayStr = new Date().toLocaleDateString("en-CA", { timeZone: "Europe/London" });
         const yesterday = new Date();
         yesterday.setDate(yesterday.getDate() - 1);
         const yesterdayStr = yesterday.toLocaleDateString("en-CA", { timeZone: "Europe/London" });
@@ -475,6 +465,7 @@ client.on('message', async (msg) => {
 
     } catch (err) {
         console.error('Unhandled exception in message processing pipeline:', err);
+        if (global.gc) global.gc();
     }
 });
 
