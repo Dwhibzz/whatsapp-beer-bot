@@ -1,5 +1,8 @@
-```javascript
 // index.js
+const http = require('http');
+// Keeps Render Web Service awake by binding to an HTTP port
+http.createServer((req, res) => res.end('Beer Bot is awake!')).listen(process.env.PORT || 3000);
+
 const { Client, LocalAuth } = require('whatsapp-web.js');
 const qrcode = require('qrcode-terminal');
 const cron = require('node-cron');
@@ -7,7 +10,7 @@ const { GoogleGenAI } = require('@google/genai');
 const { initDb } = require('./database');
 
 // --- CONFIGURATION ---
-const TARGET_GROUP_NAME = "Beers Only"; // Match your exact WhatsApp group name
+const TARGET_GROUP_NAME = "My Beer Group"; // Match your exact WhatsApp group name
 const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
 
 let beerGroupId = null;
@@ -87,21 +90,14 @@ function getDaysUntilNextQuarter() {
 
 // --- CARD & KICK HANDLER (iPhone Formatting Optimized) ---
 async function handleViolation(chat, msg, senderId, violationType = 'STANDARD') {
-    // A. NON-ALCOHOLIC DRINK DETECTED -> INSTANT STRAIGHT RED CARD
     if (violationType === 'NON_ALCOHOLIC_DRINK') {
         await db.run(`UPDATE users SET violations = 2, is_banned = 1 WHERE user_id = ?`, [senderId]);
 
         await msg.reply(
-            `🟥🟥🟥🟥🟥🟥🟥🟥
-` +
-            `*VAR: STRAIGHT RED* 🟥
-` +
-            `🟥🟥🟥🟥🟥🟥🟥🟥
-
-` +
-            `@${senderId.split('@')[0]} posted a soft drink!
-
-` +
+            `🟥🟥🟥🟥🟥🟥🟥🟥\n` +
+            `*VAR: STRAIGHT RED* 🟥\n` +
+            `🟥🟥🟥🟥🟥🟥🟥🟥\n\n` +
+            `@${senderId.split('@')[0]} posted a soft drink!\n\n` +
             `*INSTANT RED CARD & KICKED!* 🚪💥`,
             null,
             { mentions: [senderId] }
@@ -116,42 +112,27 @@ async function handleViolation(chat, msg, senderId, violationType = 'STANDARD') 
         return;
     }
 
-    // B. STANDARD 2-STRIKE SYSTEM (Yellow -> Red)
     await db.run(`UPDATE users SET violations = violations + 1 WHERE user_id = ?`, [senderId]);
     const updatedUser = await db.get(`SELECT violations FROM users WHERE user_id = ?`, [senderId]);
 
     if (updatedUser.violations === 1) {
-        // 🟨 YELLOW CARD
         await msg.reply(
-            `🟨🟨🟨🟨🟨🟨🟨🟨
-` +
-            `*VAR: YELLOW CARD* 🟨
-` +
-            `🟨🟨🟨🟨🟨🟨🟨🟨
-
-` +
-            `@${senderId.split('@')[0]}, non-beer post detected!
-
-` +
+            `🟨🟨🟨🟨🟨🟨🟨🟨\n` +
+            `*VAR: YELLOW CARD* 🟨\n` +
+            `🟨🟨🟨🟨🟨🟨🟨🟨\n\n` +
+            `@${senderId.split('@')[0]}, non-beer post detected!\n\n` +
             `You are on *1 Yellow Card*. Next violation = Red Card & Kick!`,
             null,
             { mentions: [senderId] }
         );
     } else if (updatedUser.violations >= 2) {
-        // 🟥 RED CARD & AUTO-KICK
         await db.run(`UPDATE users SET is_banned = 1 WHERE user_id = ?`, [senderId]);
 
         await msg.reply(
-            `🟥🟥🟥🟥🟥🟥🟥🟥
-` +
-            `*VAR: RED CARD* 🟥
-` +
-            `🟥🟥🟥🟥🟥🟥🟥🟥
-
-` +
-            `@${senderId.split('@')[0]} has broken the rules twice!
-
-` +
+            `🟥🟥🟥🟥🟥🟥🟥🟥\n` +
+            `*VAR: RED CARD* 🟥\n` +
+            `🟥🟥🟥🟥🟥🟥🟥🟥\n\n` +
+            `@${senderId.split('@')[0]} has broken the rules twice!\n\n` +
             `*RED CARDED & KICKED!* 🚪💥`,
             null,
             { mentions: [senderId] }
@@ -203,42 +184,29 @@ client.on('ready', async () => {
             const shamedUsers = await db.all(`SELECT * FROM users WHERE violations > 0 ORDER BY is_banned DESC, violations DESC`);
             const daysLeft = getDaysUntilNextQuarter();
 
-            let report = `🍺 *POST-MATCH ANALYSIS* 🍺
-
-`;
-            report += `📊 *Total Beers Uploaded:* ${totalRow ? totalRow.value : 0}
-`;
-            report += `🔥 *Weekend Bender (Thu-Sun):* ${peakRow ? peakRow.value : 0}
-
-`;
-            report += `🏆 *THE STARTING XI:*
-`;
+            let report = `🍺 *POST-MATCH ANALYSIS* 🍺\n\n`;
+            report += `📊 *Total Beers Uploaded:* ${totalRow ? totalRow.value : 0}\n`;
+            report += `🔥 *Weekend Bender (Thu-Sun):* ${peakRow ? peakRow.value : 0}\n\n`;
+            report += `🏆 *THE STARTING XI:*\n`;
 
             const mentions = [];
             topPosters.forEach((user, idx) => {
                 const medal = idx === 0 ? '🥇' : idx === 1 ? '🥈' : idx === 2 ? '🥉' : '🍻';
                 const streak = user.streak_count > 1 ? ` 🔥 ${user.streak_count}d` : '';
-                report += `${medal} ${idx + 1}. @${user.user_id.split('@')[0]} — ${user.beer_count}${streak}
-`;
+                report += `${medal} ${idx + 1}. @${user.user_id.split('@')[0]} — ${user.beer_count}${streak}\n`;
                 mentions.push(user.user_id);
             });
 
             if (shamedUsers.length > 0) {
-                report += `
-🚨 *VAR REVIEW:*
-`;
+                report += `\n🚨 *VAR REVIEW:*\n`;
                 shamedUsers.forEach(u => {
                     const status = u.is_banned ? '🟥 KICKED' : '🟨 YELLOW';
-                    report += `${status} — @${u.user_id.split('@')[0]}
-`;
+                    report += `${status} — @${u.user_id.split('@')[0]}\n`;
                     mentions.push(u.user_id);
                 });
             }
 
-            report += `
-🗓️ *${daysLeft} days* until Profile Photo Vote!
-
-`;
+            report += `\n🗓️ *${daysLeft} days* until Profile Photo Vote!\n\n`;
             report += `Cheers and Happy Drinking! 🍻`;
 
             await targetChat.sendMessage(report, { mentions });
@@ -258,26 +226,18 @@ client.on('ready', async () => {
 
         try {
             const targetChat = await client.getChatById(beerGroupId);
-            
-            // Fetch admins to mention them directly in the chat alert
             const admins = targetChat.participants.filter(p => p.isAdmin || p.isSuperAdmin);
             const adminMentions = admins.map(a => a.id._serialized);
 
-            let pollAlert = `🗳️ *PROFILE PHOTO VOTE IS LIVE!* 🗳️
-
-`;
-            pollAlert += `It is officially time to vote for the new group profile photo!
-
-`;
+            let pollAlert = `🗳️ *PROFILE PHOTO VOTE IS LIVE!* 🗳️\n\n`;
+            pollAlert += `It is officially time to vote for the new group profile photo!\n\n`;
             pollAlert += `Admins pinged: `;
             
             adminMentions.forEach(id => {
                 pollAlert += `@${id.split('@')[0]} `;
             });
             
-            pollAlert += `
-
-Please wait for the poll to be posted by the admins! 🍻`;
+            pollAlert += `\n\nPlease wait for the poll to be posted by the admins! 🍻`;
 
             await targetChat.sendMessage(pollAlert, { mentions: adminMentions });
             console.log('Quarterly poll vote announcement posted and admins tagged.');
@@ -297,16 +257,13 @@ client.on('message', async (msg) => {
 
     const senderId = msg.author || msg.from;
 
-    // --- ADMIN CHAT IMMUNITY BYPASS ---
-    // Allows group admins to talk freely and send text without triggering Yellow Cards
     const participant = chat.participants.find(p => p.id._serialized === senderId);
     const isAdmin = participant && (participant.isAdmin || participant.isSuperAdmin);
 
     if (isAdmin && !msg.body.startsWith('!')) {
-        return; // Exits early so admins are exempt from standard chat rule enforcement
+        return;
     }
 
-    // --- ADMIN COMMAND: MANUAL REVERT / OVERRULE (!revert @user or !var @user) ---
     if (msg.body.startsWith('!revert') || msg.body.startsWith('!var')) {
         const mentionedContacts = await msg.getMentions();
         if (mentionedContacts.length === 0) {
@@ -335,15 +292,9 @@ client.on('message', async (msg) => {
             : '🟨 Downgraded to 1 Yellow Card';
 
         await msg.reply(
-            `📺 *VAR: DECISION RESCINDED*
-
-` +
-            `The card issued to @${targetId.split('@')[0]} has been *CANCELLED*!
-
-` +
-            `Status: ${statusText}
-
-` +
+            `📺 *VAR: DECISION RESCINDED*\n\n` +
+            `The card issued to @${targetId.split('@')[0]} has been *CANCELLED*!\n\n` +
+            `Status: ${statusText}\n\n` +
             `Cheers! 🍻`,
             null,
             { mentions: [targetId] }
@@ -351,7 +302,6 @@ client.on('message', async (msg) => {
         return;
     }
 
-    // --- ADMIN COMMAND: MANUAL STRAIGHT RED (!red @user or !straightred @user) ---
     if (msg.body.startsWith('!red') || msg.body.startsWith('!straightred')) {
         const mentionedContacts = await msg.getMentions();
         if (mentionedContacts.length === 0) {
@@ -363,16 +313,10 @@ client.on('message', async (msg) => {
         await db.run(`UPDATE users SET violations = 2, is_banned = 1 WHERE user_id = ?`, [targetId]);
 
         await msg.reply(
-            `🟥🟥🟥🟥🟥🟥🟥🟥
-` +
-            `*VAR: STRAIGHT RED* 🟥
-` +
-            `🟥🟥🟥🟥🟥🟥🟥🟥
-
-` +
-            `@${targetId.split('@')[0]} has been issued a *STRAIGHT RED CARD* by the admin!
-
-` +
+            `🟥🟥🟥🟥🟥🟥🟥🟥\n` +
+            `*VAR: STRAIGHT RED* 🟥\n` +
+            `🟥🟥🟥🟥🟥🟥🟥🟥\n\n` +
+            `@${targetId.split('@')[0]} has been issued a *STRAIGHT RED CARD* by the admin!\n\n` +
             `*KICKED FROM THE GROUP!* 🚪💥`,
             null,
             { mentions: [targetId] }
@@ -395,13 +339,11 @@ client.on('message', async (msg) => {
         user = await db.get(`SELECT * FROM users WHERE user_id = ?`, [senderId]);
     }
 
-    // 1. NON-IMAGE POST DETECTED -> STANDARD YELLOW CARD VIOLATION
     if (!msg.hasMedia || msg.type !== 'image') {
         await handleViolation(chat, msg, senderId, 'STANDARD');
         return;
     }
 
-    // 2. IMAGE UPLOAD DETECTED -> AI BEER VERIFICATION
     const media = await msg.downloadMedia();
     if (!media) return;
 
@@ -418,7 +360,6 @@ client.on('message', async (msg) => {
         return;
     }
 
-    // 3. SUCCESSFUL BEER POST LOGIC (STREAKS & STATS)
     const todayStr = new Date().toISOString().split('T')[0];
     const yesterday = new Date();
     yesterday.setDate(yesterday.getDate() - 1);
@@ -446,4 +387,3 @@ client.on('message', async (msg) => {
 });
 
 client.initialize();
-```
