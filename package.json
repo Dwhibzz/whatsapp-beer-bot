@@ -6,7 +6,7 @@
     "start": "node index.js"
   },
   "dependencies": {
-    "@google/genai": "^0.1.1",
+    "@google/genai": "*",
     "node-cron": "^3.0.3",
     "qrcode-terminal": "^0.12.0",
     "sqlite": "^5.1.1",
