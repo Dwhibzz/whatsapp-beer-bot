@@ -10,7 +10,7 @@ const { GoogleGenAI } = require('@google/genai');
 const { initDb } = require('./database');
 
 // --- CONFIGURATION ---
-const TARGET_GROUP_NAME = "My Beer Group"; // Match your exact WhatsApp group name
+const TARGET_GROUP_NAME = "Beers Only"; // Match your exact WhatsApp group name
 const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
 
 let beerGroupId = null;
