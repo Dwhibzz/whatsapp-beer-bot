@@ -186,26 +186,6 @@ const client = new Client({
     }
 });
 
-// Intercept requests and block all non-essential web assets
-client.on('loading_screen', () => {
-    if (client.pupPage) {
-        try {
-            client.pupPage.setCacheEnabled(false);
-            client.pupPage.setRequestInterception(true);
-            client.pupPage.on('request', (req) => {
-                const resourceType = req.resourceType();
-                if (['image', 'stylesheet', 'font', 'media', 'other'].includes(resourceType)) {
-                    req.abort();
-                } else {
-                    req.continue();
-                }
-            });
-        } catch (err) {
-            console.error('Error setting up request interception:', err.message);
-        }
-    }
-});
-
 client.on('qr', (qr) => {
     console.log('Scan this QR code using your secondary WhatsApp number:');
     qrcode.generate(qr, { small: true });
