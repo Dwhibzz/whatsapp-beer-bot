@@ -165,11 +165,14 @@ const client = new Client({
             '--disable-accelerated-2d-canvas',
             '--no-first-run',
             '--no-zygote',
-            '--single-process',
+            '--single-process', // Crucial: merges renderer + browser into 1 process
             '--disable-gpu',
-            '--disk-cache-size=1', // Minimizes Chrome disk/RAM cache
+            '--disable-extensions',
+            '--disable-component-update',
+            '--disable-background-networking',
+            '--disk-cache-size=1',
             '--media-cache-size=1',
-            '--js-flags=--expose-gc --max-old-space-size=450'
+            '--js-flags=--expose-gc --max-old-space-size=180' // Drops Node JS heap cap down to 180MB
         ]
     }
 });
