@@ -147,7 +147,7 @@ async function handleViolation(chat, msg, senderId, violationType = 'STANDARD') 
     }
 }
 
-// --- INITIALIZE WHATSAPP CLIENT ---
+// --- INITIALIZE WHATSAPP CLIENT (MAXIMUM RAM OPTIMIZATIONS) ---
 const client = new Client({
     authStrategy: new LocalAuth(),
     puppeteer: {
@@ -161,23 +161,30 @@ const client = new Client({
             '--no-zygote',
             '--single-process',
             '--disable-gpu',
+            '--disk-cache-size=1', // Minimizes Chrome disk/RAM cache
+            '--media-cache-size=1',
             '--js-flags=--expose-gc --max-old-space-size=256'
         ]
     }
 });
 
-// Intercept Puppeteer requests to block non-essential media inside the browser
+// Intercept requests and disable internal browser media loading
 client.on('loading_screen', (percent, message) => {
     if (client.pupPage) {
-        client.pupPage.setRequestInterception(true);
-        client.pupPage.on('request', (req) => {
-            const resourceType = req.resourceType();
-            if (['image', 'stylesheet', 'font', 'media'].includes(resourceType)) {
-                req.abort();
-            } else {
-                req.continue();
-            }
-        });
+        try {
+            client.pupPage.setCacheEnabled(false); // Disables Chromium internal memory cache
+            client.pupPage.setRequestInterception(true);
+            client.pupPage.on('request', (req) => {
+                const resourceType = req.resourceType();
+                if (['image', 'stylesheet', 'font', 'media'].includes(resourceType)) {
+                    req.abort();
+                } else {
+                    req.continue();
+                }
+            });
+        } catch (err) {
+            console.error('Error setting up request interception:', err.message);
+        }
     }
 });
 
@@ -287,142 +294,183 @@ client.on('ready', async () => {
 
 // --- MESSAGE PROCESSING & RULE ENFORCEMENT ---
 client.on('message', async (msg) => {
-    const chat = await msg.getChat();
-    if (!chat.isGroup || chat.id._serialized !== beerGroupId) return;
+    try {
+        // Fast-path evaluation: ignore non-group messages directly without invoking Chromium calls
+        if (!msg.from.endsWith('@g.us')) return;
+        if (beerGroupId && msg.from !== beerGroupId) return;
 
-    const senderId = msg.author || msg.from;
-    const participant = chat.participants.find(p => p.id._serialized === senderId);
-    const isAdmin = participant && (participant.isAdmin || participant.isSuperAdmin);
-
-    // --- ADMIN COMMANDS ---
-    if (msg.body.startsWith('!revert') || msg.body.startsWith('!var')) {
-        if (!isAdmin) return; // Restrict command to admins
-
-        const mentionedContacts = await msg.getMentions();
-        if (mentionedContacts.length === 0) {
-            await msg.reply('⚠️ Please mention the user to revert! Example: `!revert @user`');
+        let chat;
+        try {
+            chat = await msg.getChat();
+        } catch (chatErr) {
+            console.error('Failed to evaluate chat context, skipping message:', chatErr.message);
             return;
         }
 
-        const targetId = mentionedContacts[0].id._serialized;
-        const user = await db.get(`SELECT * FROM users WHERE user_id = ?`, [targetId]);
+        if (!chat || chat.id._serialized !== beerGroupId) return;
 
-        if (!user || user.violations === 0) {
-            await msg.reply(`@${targetId.split('@')[0]} has a clean record! No penalties to revert.`, null, { mentions: [targetId] });
+        const senderId = msg.author || msg.from;
+        const participant = chat.participants.find(p => p.id._serialized === senderId);
+        const isAdmin = participant && (participant.isAdmin || participant.isSuperAdmin);
+
+        // --- ADMIN COMMANDS ---
+        if (msg.body.startsWith('!revert') || msg.body.startsWith('!var')) {
+            if (!isAdmin) return;
+
+            const mentionedContacts = await msg.getMentions();
+            if (mentionedContacts.length === 0) {
+                await msg.reply('⚠️ Please mention the user to revert! Example: `!revert @user`');
+                return;
+            }
+
+            const targetId = mentionedContacts[0].id._serialized;
+            const user = await db.get(`SELECT * FROM users WHERE user_id = ?`, [targetId]);
+
+            if (!user || user.violations === 0) {
+                await msg.reply(`@${targetId.split('@')[0]} has a clean record! No penalties to revert.`, null, { mentions: [targetId] });
+                return;
+            }
+
+            const newViolations = Math.max(0, user.violations - 1);
+            const newBanStatus = newViolations >= 2 ? 1 : 0;
+
+            await db.run(
+                `UPDATE users SET violations = ?, is_banned = ? WHERE user_id = ?`,
+                [newViolations, newBanStatus, targetId]
+            );
+
+            const statusText = newViolations === 0 
+                ? '🟢 Clean Record (0 Cards)' 
+                : '🟨 Downgraded to 1 Yellow Card';
+
+            await msg.reply(
+                `📺 *VAR: DECISION RESCINDED*\n\n` +
+                `The card issued to @${targetId.split('@')[0]} has been *CANCELLED*!\n\n` +
+                `Status: ${statusText}\n\n` +
+                `Cheers! 🍻`,
+                null,
+                { mentions: [targetId] }
+            );
             return;
         }
 
-        const newViolations = Math.max(0, user.violations - 1);
-        const newBanStatus = newViolations >= 2 ? 1 : 0;
+        if (msg.body.startsWith('!red') || msg.body.startsWith('!straightred')) {
+            if (!isAdmin) return;
+
+            const mentionedContacts = await msg.getMentions();
+            if (mentionedContacts.length === 0) {
+                await msg.reply('⚠️ Please mention the user to red card! Example: `!red @user`');
+                return;
+            }
+
+            const targetId = mentionedContacts[0].id._serialized;
+            await db.run(`UPDATE users SET violations = 2, is_banned = 1 WHERE user_id = ?`, [targetId]);
+
+            await msg.reply(
+                `🟥🟥🟥🟥🟥🟥🟥🟥\n` +
+                `*VAR: STRAIGHT RED* 🟥\n` +
+                `🟥🟥🟥🟥🟥🟥🟥🟥\n\n` +
+                `@${targetId.split('@')[0]} has been issued a *STRAIGHT RED CARD* by the admin!\n\n` +
+                `*KICKED FROM THE GROUP!* 🚪💥`,
+                null,
+                { mentions: [targetId] }
+            );
+
+            try {
+                await chat.removeParticipants([targetId]);
+            } catch (kickErr) {
+                console.error(`Failed to kick @${targetId.split('@')[0]}:`, kickErr);
+            }
+            return;
+        }
+
+        // Bypass normal rule checks for non-command messages sent by admins
+        if (isAdmin) return;
+
+        // --- REGULAR USER CHECKING ---
+        const contact = await msg.getContact();
+        const userName = contact.pushname || contact.name || 'Unknown User';
+
+        let user = await db.get(`SELECT * FROM users WHERE user_id = ?`, [senderId]);
+        if (!user) {
+            await db.run(`INSERT INTO users (user_id, name) VALUES (?, ?)`, [senderId, userName]);
+            user = await db.get(`SELECT * FROM users WHERE user_id = ?`, [senderId]);
+        }
+
+        if (!msg.hasMedia || msg.type !== 'image') {
+            await handleViolation(chat, msg, senderId, 'STANDARD');
+            return;
+        }
+
+        let media;
+        try {
+            media = await msg.downloadMedia();
+        } catch (downloadErr) {
+            console.error('Failed to download media buffer:', downloadErr.message);
+            return;
+        }
+
+        if (!media || !media.data) return;
+
+        let imageBuffer = Buffer.from(media.data, 'base64');
+        const imageCheckResult = await verifyBeerImage(imageBuffer, media.mimetype);
+
+        // --- AGGRESSIVE RAM PURGE ---
+        imageBuffer = null;
+        media = null;
+
+        // 1. Force Node.js Garbage Collection
+        if (global.gc) global.gc();
+
+        // 2. Clear Chromium's DevTools Network Cache
+        if (client.pupPage) {
+            try {
+                const devTools = await client.pupPage.target().createCDPSession();
+                await devTools.send('Network.clearBrowserCache');
+                await devTools.detach();
+            } catch (cdpErr) {
+                console.error('CDP cache clear ignored:', cdpErr.message);
+            }
+        }
+
+        if (imageCheckResult === 'NON_ALCOHOLIC_DRINK') {
+            await handleViolation(chat, msg, senderId, 'NON_ALCOHOLIC_DRINK');
+            return;
+        }
+
+        if (imageCheckResult === 'INVALID') {
+            await handleViolation(chat, msg, senderId, 'STANDARD');
+            return;
+        }
+
+        const todayStr = new Date().toLocaleDateString("en-CA", { timeZone: "Europe/London" }); // YYYY-MM-DD
+        const yesterday = new Date();
+        yesterday.setDate(yesterday.getDate() - 1);
+        const yesterdayStr = yesterday.toLocaleDateString("en-CA", { timeZone: "Europe/London" });
+
+        let newStreak = 1;
+        if (user.last_post_date === yesterdayStr) {
+            newStreak = user.streak_count + 1;
+        } else if (user.last_post_date === todayStr) {
+            newStreak = user.streak_count;
+        }
 
         await db.run(
-            `UPDATE users SET violations = ?, is_banned = ? WHERE user_id = ?`,
-            [newViolations, newBanStatus, targetId]
+            `UPDATE users SET beer_count = beer_count + 1, streak_count = ?, last_post_date = ? WHERE user_id = ?`,
+            [newStreak, todayStr, senderId]
         );
 
-        const statusText = newViolations === 0 
-            ? '🟢 Clean Record (0 Cards)' 
-            : '🟨 Downgraded to 1 Yellow Card';
+        await db.run(`UPDATE system_stats SET value = value + 1 WHERE key = 'total_beers'`);
 
-        await msg.reply(
-            `📺 *VAR: DECISION RESCINDED*\n\n` +
-            `The card issued to @${targetId.split('@')[0]} has been *CANCELLED*!\n\n` +
-            `Status: ${statusText}\n\n` +
-            `Cheers! 🍻`,
-            null,
-            { mentions: [targetId] }
-        );
-        return;
-    }
-
-    if (msg.body.startsWith('!red') || msg.body.startsWith('!straightred')) {
-        if (!isAdmin) return; // Restrict command to admins
-
-        const mentionedContacts = await msg.getMentions();
-        if (mentionedContacts.length === 0) {
-            await msg.reply('⚠️ Please mention the user to red card! Example: `!red @user`');
-            return;
+        if (isPeakWindow()) {
+            await db.run(`UPDATE system_stats SET value = value + 1 WHERE key = 'peak_window_beers'`);
         }
 
-        const targetId = mentionedContacts[0].id._serialized;
-        await db.run(`UPDATE users SET violations = 2, is_banned = 1 WHERE user_id = ?`, [targetId]);
+        console.log(`Verified beer post from ${userName} (Streak: ${newStreak}d)`);
 
-        await msg.reply(
-            `🟥🟥🟥🟥🟥🟥🟥🟥\n` +
-            `*VAR: STRAIGHT RED* 🟥\n` +
-            `🟥🟥🟥🟥🟥🟥🟥🟥\n\n` +
-            `@${targetId.split('@')[0]} has been issued a *STRAIGHT RED CARD* by the admin!\n\n` +
-            `*KICKED FROM THE GROUP!* 🚪💥`,
-            null,
-            { mentions: [targetId] }
-        );
-
-        try {
-            await chat.removeParticipants([targetId]);
-        } catch (kickErr) {
-            console.error(`Failed to kick @${targetId.split('@')[0]}:`, kickErr);
-        }
-        return;
+    } catch (err) {
+        console.error('Unhandled exception in message processing pipeline:', err);
     }
-
-    // Bypass normal check for non-command messages from admins
-    if (isAdmin) return;
-
-    // --- REGULAR USER CHECKING ---
-    const contact = await msg.getContact();
-    const userName = contact.pushname || contact.name || 'Unknown User';
-
-    let user = await db.get(`SELECT * FROM users WHERE user_id = ?`, [senderId]);
-    if (!user) {
-        await db.run(`INSERT INTO users (user_id, name) VALUES (?, ?)`, [senderId, userName]);
-        user = await db.get(`SELECT * FROM users WHERE user_id = ?`, [senderId]);
-    }
-
-    if (!msg.hasMedia || msg.type !== 'image') {
-        await handleViolation(chat, msg, senderId, 'STANDARD');
-        return;
-    }
-
-    const media = await msg.downloadMedia();
-    if (!media) return;
-
-    const imageBuffer = Buffer.from(media.data, 'base64');
-    const imageCheckResult = await verifyBeerImage(imageBuffer, media.mimetype);
-
-    if (imageCheckResult === 'NON_ALCOHOLIC_DRINK') {
-        await handleViolation(chat, msg, senderId, 'NON_ALCOHOLIC_DRINK');
-        return;
-    }
-
-    if (imageCheckResult === 'INVALID') {
-        await handleViolation(chat, msg, senderId, 'STANDARD');
-        return;
-    }
-
-    const todayStr = new Date().toLocaleDateString("en-CA", { timeZone: "Europe/London" }); // YYYY-MM-DD
-    const yesterday = new Date();
-    yesterday.setDate(yesterday.getDate() - 1);
-    const yesterdayStr = yesterday.toLocaleDateString("en-CA", { timeZone: "Europe/London" });
-
-    let newStreak = 1;
-    if (user.last_post_date === yesterdayStr) {
-        newStreak = user.streak_count + 1;
-    } else if (user.last_post_date === todayStr) {
-        newStreak = user.streak_count;
-    }
-
-    await db.run(
-        `UPDATE users SET beer_count = beer_count + 1, streak_count = ?, last_post_date = ? WHERE user_id = ?`,
-        [newStreak, todayStr, senderId]
-    );
-
-    await db.run(`UPDATE system_stats SET value = value + 1 WHERE key = 'total_beers'`);
-
-    if (isPeakWindow()) {
-        await db.run(`UPDATE system_stats SET value = value + 1 WHERE key = 'peak_window_beers'`);
-    }
-
-    console.log(`Verified beer post from ${userName} (Streak: ${newStreak}d)`);
 });
 
 client.initialize();
