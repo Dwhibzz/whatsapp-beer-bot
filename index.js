@@ -147,7 +147,7 @@ async function handleViolation(chat, msg, senderId, violationType = 'STANDARD') 
     }
 }
 
-// --- INITIALIZE WHATSAPP CLIENT ---
+// --- INITIALIZE WHATSAPP CLIENT (WITH RAM OPTIMIZATIONS) ---
 const client = new Client({
     authStrategy: new LocalAuth(),
     puppeteer: {
@@ -159,7 +159,8 @@ const client = new Client({
             '--no-first-run',
             '--no-zygote',
             '--single-process',
-            '--disable-gpu'
+            '--disable-gpu',
+            '--js-flags=--max-old-space-size=256'
         ]
     }
 });
@@ -173,15 +174,22 @@ client.on('ready', async () => {
     console.log('🍺 Beer Bot is online!');
     db = await initDb();
 
-    const chats = await client.getChats();
-    const group = chats.find(c => c.isGroup && c.name === TARGET_GROUP_NAME);
+    // 5-second safe delay for WhatsApp Web internal chat synchronization
+    setTimeout(async () => {
+        try {
+            const chats = await client.getChats();
+            const group = chats.find(c => c.isGroup && c.name === TARGET_GROUP_NAME);
 
-    if (group) {
-        beerGroupId = group.id._serialized;
-        console.log(`Connected to group: "${TARGET_GROUP_NAME}" (${beerGroupId})`);
-    } else {
-        console.error(`Group "${TARGET_GROUP_NAME}" not found. Ensure the bot is added!`);
-    }
+            if (group) {
+                beerGroupId = group.id._serialized;
+                console.log(`Connected to group: "${TARGET_GROUP_NAME}" (${beerGroupId})`);
+            } else {
+                console.error(`Group "${TARGET_GROUP_NAME}" not found. Ensure the bot is added!`);
+            }
+        } catch (err) {
+            console.error('Non-fatal store sync warning on startup:', err.message);
+        }
+    }, 5000);
 
     // --- CRON 1: WEEKLY SUNDAY 8:00 PM UK REPORT ---
     cron.schedule('0 20 * * 0', async () => {
