@@ -1,7 +1,13 @@
 // index.js
 const http = require('http');
-// Keeps Render Web Service awake by binding to an HTTP port
-http.createServer((req, res) => res.end('Beer Bot is awake!')).listen(process.env.PORT || 3000);
+// Keeps Render Web Service awake & prevents hard health-check restarts
+const PORT = process.env.PORT || 3000;
+http.createServer((req, res) => {
+    res.writeHead(200, { 'Content-Type': 'text/plain' });
+    res.end('Beer Bot is alive!');
+}).listen(PORT, '0.0.0.0', () => {
+    console.log(`HTTP Health Check server running on port ${PORT}`);
+});
 
 const { Client, LocalAuth } = require('whatsapp-web.js');
 const qrcode = require('qrcode-terminal');
