@@ -3,12 +3,12 @@
   "version": "1.0.0",
   "main": "index.js",
   "scripts": {
-    "postinstall": "PUPPETEER_CACHE_DIR=./.cache/puppeteer npx puppeteer browsers install chrome",
-    "start": "PUPPETEER_CACHE_DIR=./.cache/puppeteer node index.js"
+    "start": "node index.js"
   },
   "dependencies": {
     "@google/genai": "*",
     "node-cron": "^3.0.3",
+    "puppeteer": "^22.0.0",
     "qrcode-terminal": "^0.12.0",
     "sqlite": "^5.1.1",
     "sqlite3": "^5.1.7",
