@@ -274,7 +274,7 @@ function initWhatsAppClient() {
             if (global.gc) global.gc();
         }, 15 * 60 * 1000);
 
-        // CRON 1: Weekly Sunday 8:00 PM UK Compact Report
+        // CRON 1: Weekly Sunday 8:00 PM UK Report (Option 1: Classic Spaced)
         cron.schedule('0 20 * * 0', async () => {
             try {
                 const chats = await client.getChats();
@@ -296,40 +296,42 @@ function initWhatsAppClient() {
                 const shamedUsers = await db.all(`SELECT * FROM users WHERE violations > 0 ORDER BY is_banned DESC, violations DESC`);
                 const daysLeft = getDaysUntilNextQuarter();
 
-                let report = `🍺 *WEEKLY POST-MATCH* 🍺\n\n`;
-                report += `📊 *Total:* ${totalRow ? totalRow.value : 0} | *Weekend:* ${peakRow ? peakRow.value : 0}\n\n`;
-                report += `🏆 *TOP 5 THIS WEEK:*\n`;
+                let report = `🍺 *POST-MATCH ANALYSIS* 🍺\n\n`;
+                report += `📊 *Total Beers Uploaded:* ${totalRow ? totalRow.value : 0}\n`;
+                report += `🔥 *Weekend Bender (Thu-Sun):* ${peakRow ? peakRow.value : 0}\n\n`;
+                report += `🏆 *THE STARTING XI (TOP 5):*\n`;
 
                 const mentions = [];
                 topPosters.forEach((user, idx) => {
                     const medal = idx === 0 ? '🥇' : idx === 1 ? '🥈' : idx === 2 ? '🥉' : '🍻';
-                    const streak = user.streak_count > 1 ? ` 🔥${user.streak_count}d` : '';
-                    report += `${medal} @${user.user_id.split('@')[0]} — ${user.beer_count} (${user.beer_count} total)${streak}\n`;
+                    const streak = user.streak_count > 1 ? ` 🔥 ${user.streak_count}d` : '';
+                    report += `${medal} ${idx + 1}. @${user.user_id.split('@')[0]} — ${user.beer_count} beers${streak}\n`;
                     mentions.push(user.user_id);
                 });
 
                 if (pardonedUsers.length > 0) {
-                    report += `\n🧼 *PARDONS:*\n`;
+                    report += `\n🧼 *VAR PARDONS (7-Day Good Behavior):*\n`;
                     pardonedUsers.forEach(id => {
-                        report += `🟢 @${id.split('@')[0]} (-1 Yellow)\n`;
+                        report += `🟢 Yellow Card rescinded for @${id.split('@')[0]}\n`;
                         mentions.push(id);
                     });
                 }
 
                 if (shamedUsers.length > 0) {
-                    report += `\n🚨 *VAR:*\n`;
+                    report += `\n🚨 *VAR REVIEW:*\n`;
                     shamedUsers.forEach(u => {
                         const status = u.is_banned ? '🟥 KICKED' : '🟨 YELLOW';
-                        report += `${status} @${u.user_id.split('@')[0]}\n`;
+                        report += `${status} — @${u.user_id.split('@')[0]}\n`;
                         mentions.push(u.user_id);
                     });
                 }
 
-                report += `\n🗓️ *${daysLeft}d* to Profile Vote!\n\nCheers! 🍻`;
+                report += `\n🗓️ *${daysLeft} days* until Profile Photo Vote!\n\n`;
+                report += `Cheers and Happy Drinking! 🍻`;
 
                 await targetChat.sendMessage(report, { mentions });
                 await db.run(`UPDATE system_stats SET value = 0 WHERE key = 'peak_window_beers'`);
-                console.log('Sunday 8 PM UK compact report posted.');
+                console.log('Sunday 8 PM UK report posted (Option 1).');
             } catch (err) {
                 console.error('Error executing Sunday cron job:', err);
             }
@@ -372,14 +374,12 @@ function initWhatsAppClient() {
     // --- MESSAGE PROCESSING & RULE ENFORCEMENT ---
     client.on('message', async (msg) => {
         try {
-            // Safe group check without throwing Puppeteer 'r' exception
             if (!msg.from.endsWith('@g.us')) return;
 
             let chat;
             try {
                 chat = await msg.getChat();
             } catch (chatErr) {
-                // Ignore temporary Puppeteer sync error and fail-safe return
                 return;
             }
 
@@ -387,7 +387,6 @@ function initWhatsAppClient() {
 
             const senderId = msg.author || msg.from;
 
-            // Safe Admin Detection
             const isGroupAdmin = chat.participants ? chat.participants.some(
                 p => p.id._serialized === senderId && (p.isAdmin || p.isSuperAdmin)
             ) : false;
@@ -446,9 +445,9 @@ function initWhatsAppClient() {
                 await db.run(`UPDATE users SET violations = 2, is_banned = 1 WHERE user_id = ?`, [targetId]);
 
                 await msg.reply(
-                    `劃劃劃劃劃劃劃劃\n` +
+                    `🟥🟥🟥🟥🟥🟥🟥🟥\n` +
                     `*VAR: STRAIGHT RED* 🟥\n` +
-                    `劃劃劃劃劃劃劃劃\n\n` +
+                    `🟥🟥🟥🟥🟥🟥🟥🟥\n\n` +
                     `@${targetId.split('@')[0]} has been issued a *STRAIGHT RED CARD* by the admin!\n\n` +
                     `*KICKED FROM THE GROUP!* 🚪💥`,
                     null,
