@@ -202,22 +202,23 @@ function initWhatsAppClient() {
         console.log('🍺 Beer Bot is online!');
         db = await initDb();
 
-        // --- GROUP AUDIT CHECK ---
-        try {
-            const chats = await client.getChats();
-            const groupChats = chats.filter(c => c.isGroup);
-            const targetGroup = groupChats.find(c => c.name === TARGET_GROUP_NAME);
+        // 5-second delay lets Puppeteer finish background DB sync before querying chat list
+        setTimeout(async () => {
+            try {
+                const chats = await client.getChats();
+                const groupChats = chats.filter(c => c.isGroup);
+                const targetGroup = groupChats.find(c => c.name === TARGET_GROUP_NAME);
 
-            console.log(`📋 Total group chats found: ${groupChats.length}`);
-            if (targetGroup) {
-                console.log(`✅ SUCCESSFULLY CONNECTED to group: "${targetGroup.name}" (ID: ${targetGroup.id._serialized})`);
-            } else {
-                console.log(`⚠️ WARNING: Could not find group "${TARGET_GROUP_NAME}". Available groups:`, groupChats.map(g => g.name));
+                console.log(`📋 Total group chats found: ${groupChats.length}`);
+                if (targetGroup) {
+                    console.log(`✅ SUCCESSFULLY CONNECTED to group: "${targetGroup.name}" (ID: ${targetGroup.id._serialized})`);
+                } else {
+                    console.log(`⚠️ WARNING: Could not find group "${TARGET_GROUP_NAME}". Available groups:`, groupChats.map(g => g.name));
+                }
+            } catch (err) {
+                console.error('Error fetching group chats on startup:', err.message);
             }
-        } catch (err) {
-            console.error('Error fetching group chats on startup:', err.message);
-        }
-        // -------------------------
+        }, 5000);
 
         // Periodic RAM Sanitation Guard (Runs every 15 minutes)
         setInterval(async () => {
@@ -381,9 +382,9 @@ function initWhatsAppClient() {
                 await db.run(`UPDATE users SET violations = 2, is_banned = 1 WHERE user_id = ?`, [targetId]);
 
                 await msg.reply(
-                    `划分划划划划划划\n` +
+                    `🟥🟥🟥🟥🟥🟥🟥🟥\n` +
                     `*VAR: STRAIGHT RED* 🟥\n` +
-                    `劃劃劃劃劃劃劃劃\n\n` +
+                    `🟥🟥🟥🟥🟥🟥🟥🟥\n\n` +
                     `@${targetId.split('@')[0]} has been issued a *STRAIGHT RED CARD* by the admin!\n\n` +
                     `*KICKED FROM THE GROUP!* 🚪💥`,
                     null,
