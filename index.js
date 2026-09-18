@@ -202,23 +202,34 @@ function initWhatsAppClient() {
         console.log('🍺 Beer Bot is online!');
         db = await initDb();
 
-        // 5-second delay lets Puppeteer finish background DB sync before querying chat list
+        // Safe Startup Group Audit Check (Delays check until store syncs)
         setTimeout(async () => {
             try {
                 const chats = await client.getChats();
-                const groupChats = chats.filter(c => c.isGroup);
-                const targetGroup = groupChats.find(c => c.name === TARGET_GROUP_NAME);
+                const targetGroup = chats.find(c => c.isGroup && c.name === TARGET_GROUP_NAME);
 
-                console.log(`📋 Total group chats found: ${groupChats.length}`);
                 if (targetGroup) {
-                    console.log(`✅ SUCCESSFULLY CONNECTED to group: "${targetGroup.name}" (ID: ${targetGroup.id._serialized})`);
+                    console.log(`✅ CONNECTED: Target group "${targetGroup.name}" is active.`);
                 } else {
-                    console.log(`⚠️ WARNING: Could not find group "${TARGET_GROUP_NAME}". Available groups:`, groupChats.map(g => g.name));
+                    console.log(`ℹ️ Startup sync complete. Standing by for incoming messages in "${TARGET_GROUP_NAME}".`);
                 }
             } catch (err) {
-                console.error('Error fetching group chats on startup:', err.message);
+                console.log(`ℹ️ Startup sync complete. Listener active for "${TARGET_GROUP_NAME}".`);
             }
-        }, 5000);
+        }, 10000);
+
+        // Daily Database Backup Cron (Runs at midnight UK time)
+        cron.schedule('0 0 * * *', async () => {
+            try {
+                await db.run(`VACUUM INTO '/app/.wwebjs_auth/beerbot_backup.db'`);
+                console.log('📦 Daily database backup created successfully in persistent volume.');
+            } catch (err) {
+                console.error('Failed to create daily database backup:', err);
+            }
+        }, {
+            scheduled: true,
+            timezone: "Europe/London"
+        });
 
         // Periodic RAM Sanitation Guard (Runs every 15 minutes)
         setInterval(async () => {
