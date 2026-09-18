@@ -1,11 +1,13 @@
 // index.js
 const http = require('http');
 
-// Keeps Web Service awake & provides health check
-const PORT = process.env.PORT || 3000;
+// Railway passes PORT dynamically; default to 8080 if not set
+const PORT = process.env.PORT || 8080;
+
 http.createServer((req, res) => {
+    // Respond instantly to ANY health probe request from Railway
     res.writeHead(200, { 'Content-Type': 'text/plain' });
-    res.end('Beer Bot is alive!');
+    res.end('OK');
 }).listen(PORT, '0.0.0.0', () => {
     console.log(`HTTP Health Check server running on port ${PORT}`);
 });
