@@ -12,7 +12,6 @@ const server = http.createServer((req, res) => {
 
 server.listen(PORT, '0.0.0.0', () => {
     console.log(`HTTP Health Check server running on port ${PORT}`);
-    // Boot Puppeteer ONLY after the server is safely bound and responding to probes
     initWhatsAppClient();
 });
 
@@ -58,20 +57,20 @@ async function verifyBeerImage(base64Data, mimeType) {
         return 'INVALID';
     } catch (err) {
         console.error('AI Verification error (failing safe):', err);
-        return 'BEER'; // Fallback to prevent breaking on API timeouts
+        return 'BEER';
     }
 }
 
 // --- UK PEAK HOURS CHECKER (Thursday 5 PM to Sunday 8 PM UK Time) ---
 function isPeakWindow() {
     const now = new Date(new Date().toLocaleString("en-US", { timeZone: "Europe/London" }));
-    const day = now.getDay(); // 0 = Sun, 4 = Thu, 5 = Fri, 6 = Sat
+    const day = now.getDay();
     const hour = now.getHours();
 
-    if (day === 4 && hour >= 17) return true;  // Thursday 5:00 PM - 11:59 PM
-    if (day === 5) return true;                 // Friday all day
-    if (day === 6) return true;                 // Saturday all day
-    if (day === 0 && hour < 20) return true;    // Sunday 12:00 AM - 7:59 PM
+    if (day === 4 && hour >= 17) return true;
+    if (day === 5) return true;
+    if (day === 6) return true;
+    if (day === 0 && hour < 20) return true;
     
     return false;
 }
@@ -81,7 +80,7 @@ function getDaysUntilNextQuarter() {
     const now = new Date();
     const year = now.getFullYear();
     
-    const quarterMonths = [0, 3, 6, 9]; // Jan 1, Apr 1, Jul 1, Oct 1
+    const quarterMonths = [0, 3, 6, 9];
     let nextQuarterDate = null;
 
     for (const month of quarterMonths) {
@@ -102,8 +101,12 @@ function getDaysUntilNextQuarter() {
 
 // --- CARD & KICK HANDLER ---
 async function handleViolation(msg, senderId, violationType = 'STANDARD') {
-    // Obtain chat directly from the message object (Fixes Puppeteer getChatById `r: r` error)
-    const chat = await msg.getChat();
+    let chat;
+    try {
+        chat = await msg.getChat();
+    } catch (e) {
+        console.error('Warning: could not fetch chat object for violation handling:', e.message);
+    }
 
     if (violationType === 'NON_ALCOHOLIC_DRINK') {
         await db.run(`UPDATE users SET violations = 2, is_banned = 1 WHERE user_id = ?`, [senderId]);
@@ -118,11 +121,13 @@ async function handleViolation(msg, senderId, violationType = 'STANDARD') {
             { mentions: [senderId] }
         );
 
-        try {
-            await chat.removeParticipants([senderId]);
-            console.log(`Straight Red: Kicked @${senderId.split('@')[0]} for soft drink post.`);
-        } catch (kickErr) {
-            console.error(`Failed to kick @${senderId.split('@')[0]}. Ensure bot is Admin:`, kickErr);
+        if (chat) {
+            try {
+                await chat.removeParticipants([senderId]);
+                console.log(`Straight Red: Kicked @${senderId.split('@')[0]} for soft drink post.`);
+            } catch (kickErr) {
+                console.error(`Failed to kick @${senderId.split('@')[0]}. Ensure bot is Admin:`, kickErr);
+            }
         }
         return;
     }
@@ -153,12 +158,39 @@ async function handleViolation(msg, senderId, violationType = 'STANDARD') {
             { mentions: [senderId] }
         );
 
-        try {
-            await chat.removeParticipants([senderId]);
-            console.log(`Kicked @${senderId.split('@')[0]} from group.`);
-        } catch (kickErr) {
-            console.error(`Failed to kick @${senderId.split('@')[0]}. Ensure bot is Admin:`, kickErr);
+        if (chat) {
+            try {
+                await chat.removeParticipants([senderId]);
+                console.log(`Kicked @${senderId.split('@')[0]} from group.`);
+            } catch (kickErr) {
+                console.error(`Failed to kick @${senderId.split('@')[0]}. Ensure bot is Admin:`, kickErr);
+            }
         }
+    }
+}
+
+// --- CHECK & AWARD ACHIEVEMENTS ---
+async function checkAchievements(msg, senderId, newTotalBeers, newStreak) {
+    let badgeTitle = '';
+    let badgeDesc = '';
+
+    if (newTotalBeers === 100) {
+        badgeTitle = '💯 The Centurion';
+        badgeDesc = '100 total beers logged!';
+    } else if (newStreak === 7) {
+        badgeTitle = '🏃 The Marathon Runner';
+        badgeDesc = '7-day consecutive beer streak logged!';
+    }
+
+    if (badgeTitle) {
+        await msg.reply(
+            `🏆 *ACHIEVEMENT UNLOCKED!* 🏆\n\n` +
+            `@${senderId.split('@')[0]} just earned: *${badgeTitle}*\n` +
+            `_${badgeDesc}_\n\n` +
+            `Total Beers: ${newTotalBeers} | Streak: ${newStreak}d 🍻`,
+            null,
+            { mentions: [senderId] }
+        );
     }
 }
 
@@ -202,7 +234,6 @@ function initWhatsAppClient() {
         console.log('🍺 Beer Bot is online!');
         db = await initDb();
 
-        // Safe Startup Group Audit Check (Delays check until store syncs)
         setTimeout(async () => {
             try {
                 const chats = await client.getChats();
@@ -218,7 +249,7 @@ function initWhatsAppClient() {
             }
         }, 10000);
 
-        // Daily Database Backup Cron (Runs at midnight UK time)
+        // Daily Database Backup Cron (Midnight UK time)
         cron.schedule('0 0 * * *', async () => {
             try {
                 await db.run(`VACUUM INTO '/app/.wwebjs_auth/beerbot_backup.db'`);
@@ -231,7 +262,7 @@ function initWhatsAppClient() {
             timezone: "Europe/London"
         });
 
-        // Periodic RAM Sanitation Guard (Runs every 15 minutes)
+        // Periodic RAM Sanitation Guard (Every 15 minutes)
         setInterval(async () => {
             if (client.pupPage) {
                 try {
@@ -243,12 +274,20 @@ function initWhatsAppClient() {
             if (global.gc) global.gc();
         }, 15 * 60 * 1000);
 
-        // CRON 1: Weekly Sunday 8:00 PM UK Report
+        // CRON 1: Weekly Sunday 8:00 PM UK Compact Report
         cron.schedule('0 20 * * 0', async () => {
             try {
                 const chats = await client.getChats();
                 const targetChat = chats.find(c => c.isGroup && c.name === TARGET_GROUP_NAME);
                 if (!targetChat) return;
+
+                // Auto-Pardon Check
+                const pardonedUsers = [];
+                const yellowCardUsers = await db.all(`SELECT * FROM users WHERE violations = 1 AND streak_count >= 7 AND is_banned = 0`);
+                for (const u of yellowCardUsers) {
+                    await db.run(`UPDATE users SET violations = 0 WHERE user_id = ?`, [u.user_id]);
+                    pardonedUsers.push(u.user_id);
+                }
 
                 const totalRow = await db.get(`SELECT value FROM system_stats WHERE key = 'total_beers'`);
                 const peakRow = await db.get(`SELECT value FROM system_stats WHERE key = 'peak_window_beers'`);
@@ -257,34 +296,40 @@ function initWhatsAppClient() {
                 const shamedUsers = await db.all(`SELECT * FROM users WHERE violations > 0 ORDER BY is_banned DESC, violations DESC`);
                 const daysLeft = getDaysUntilNextQuarter();
 
-                let report = `🍺 *POST-MATCH ANALYSIS* 🍺\n\n`;
-                report += `📊 *Total Beers Uploaded:* ${totalRow ? totalRow.value : 0}\n`;
-                report += `🔥 *Weekend Bender (Thu-Sun):* ${peakRow ? peakRow.value : 0}\n\n`;
-                report += `🏆 *THE STARTING XI:*\n`;
+                let report = `🍺 *WEEKLY POST-MATCH* 🍺\n\n`;
+                report += `📊 *Total:* ${totalRow ? totalRow.value : 0} | *Weekend:* ${peakRow ? peakRow.value : 0}\n\n`;
+                report += `🏆 *TOP 5 THIS WEEK:*\n`;
 
                 const mentions = [];
                 topPosters.forEach((user, idx) => {
                     const medal = idx === 0 ? '🥇' : idx === 1 ? '🥈' : idx === 2 ? '🥉' : '🍻';
-                    const streak = user.streak_count > 1 ? ` 🔥 ${user.streak_count}d` : '';
-                    report += `${medal} ${idx + 1}. @${user.user_id.split('@')[0]} — ${user.beer_count}${streak}\n`;
+                    const streak = user.streak_count > 1 ? ` 🔥${user.streak_count}d` : '';
+                    report += `${medal} @${user.user_id.split('@')[0]} — ${user.beer_count} (${user.beer_count} total)${streak}\n`;
                     mentions.push(user.user_id);
                 });
 
+                if (pardonedUsers.length > 0) {
+                    report += `\n🧼 *PARDONS:*\n`;
+                    pardonedUsers.forEach(id => {
+                        report += `🟢 @${id.split('@')[0]} (-1 Yellow)\n`;
+                        mentions.push(id);
+                    });
+                }
+
                 if (shamedUsers.length > 0) {
-                    report += `\n🚨 *VAR REVIEW:*\n`;
+                    report += `\n🚨 *VAR:*\n`;
                     shamedUsers.forEach(u => {
                         const status = u.is_banned ? '🟥 KICKED' : '🟨 YELLOW';
-                        report += `${status} — @${u.user_id.split('@')[0]}\n`;
+                        report += `${status} @${u.user_id.split('@')[0]}\n`;
                         mentions.push(u.user_id);
                     });
                 }
 
-                report += `\n🗓️ *${daysLeft} days* until Profile Photo Vote!\n\n`;
-                report += `Cheers and Happy Drinking! 🍻`;
+                report += `\n🗓️ *${daysLeft}d* to Profile Vote!\n\nCheers! 🍻`;
 
                 await targetChat.sendMessage(report, { mentions });
                 await db.run(`UPDATE system_stats SET value = 0 WHERE key = 'peak_window_beers'`);
-                console.log('Sunday 8 PM UK report posted.');
+                console.log('Sunday 8 PM UK compact report posted.');
             } catch (err) {
                 console.error('Error executing Sunday cron job:', err);
             }
@@ -327,17 +372,25 @@ function initWhatsAppClient() {
     // --- MESSAGE PROCESSING & RULE ENFORCEMENT ---
     client.on('message', async (msg) => {
         try {
-            const chat = await msg.getChat();
+            // Safe group check without throwing Puppeteer 'r' exception
+            if (!msg.from.endsWith('@g.us')) return;
 
-            // Dynamic Group Match - ignores messages outside the specified group
-            if (!chat.isGroup || chat.name !== TARGET_GROUP_NAME) return;
+            let chat;
+            try {
+                chat = await msg.getChat();
+            } catch (chatErr) {
+                // Ignore temporary Puppeteer sync error and fail-safe return
+                return;
+            }
+
+            if (!chat || !chat.isGroup || chat.name !== TARGET_GROUP_NAME) return;
 
             const senderId = msg.author || msg.from;
 
-            // Admin Detection
-            const isGroupAdmin = chat.participants.some(
+            // Safe Admin Detection
+            const isGroupAdmin = chat.participants ? chat.participants.some(
                 p => p.id._serialized === senderId && (p.isAdmin || p.isSuperAdmin)
-            );
+            ) : false;
 
             // --- ADMIN COMMANDS ---
             if (msg.body.startsWith('!revert') || msg.body.startsWith('!var')) {
@@ -393,9 +446,9 @@ function initWhatsAppClient() {
                 await db.run(`UPDATE users SET violations = 2, is_banned = 1 WHERE user_id = ?`, [targetId]);
 
                 await msg.reply(
-                    `🟥🟥🟥🟥🟥🟥🟥🟥\n` +
+                    `劃劃劃劃劃劃劃劃\n` +
                     `*VAR: STRAIGHT RED* 🟥\n` +
-                    `🟥🟥🟥🟥🟥🟥🟥🟥\n\n` +
+                    `劃劃劃劃劃劃劃劃\n\n` +
                     `@${targetId.split('@')[0]} has been issued a *STRAIGHT RED CARD* by the admin!\n\n` +
                     `*KICKED FROM THE GROUP!* 🚪💥`,
                     null,
@@ -410,15 +463,12 @@ function initWhatsAppClient() {
                 return;
             }
 
-            // Skip rule checks for admins so they aren't penalized
             if (isGroupAdmin) return;
 
-            // Skip regular chat messages (only evaluate image/media posts)
             if (!msg.hasMedia || (msg.type !== 'image' && msg.type !== 'sticker')) {
                 return;
             }
 
-            // Fetch / Register User
             const userName = msg._data?.notifyName || 'Unknown User';
             let user = await db.get(`SELECT * FROM users WHERE user_id = ?`, [senderId]);
             if (!user) {
@@ -436,10 +486,8 @@ function initWhatsAppClient() {
 
             if (!media || !media.data) return;
 
-            // Verify image with Gemini AI
             const imageCheckResult = await verifyBeerImage(media.data, media.mimetype);
 
-            // Immediate RAM Purge
             media = null;
             if (global.gc) global.gc();
 
@@ -466,9 +514,11 @@ function initWhatsAppClient() {
                 newStreak = user.streak_count;
             }
 
+            const newTotalBeers = user.beer_count + 1;
+
             await db.run(
-                `UPDATE users SET beer_count = beer_count + 1, streak_count = ?, last_post_date = ? WHERE user_id = ?`,
-                [newStreak, todayStr, senderId]
+                `UPDATE users SET beer_count = ?, streak_count = ?, last_post_date = ? WHERE user_id = ?`,
+                [newTotalBeers, newStreak, todayStr, senderId]
             );
 
             await db.run(`UPDATE system_stats SET value = value + 1 WHERE key = 'total_beers'`);
@@ -478,6 +528,9 @@ function initWhatsAppClient() {
             }
 
             console.log(`Verified beer post from ${userName} (Streak: ${newStreak}d)`);
+
+            // Evaluate Achievement Milestones
+            await checkAchievements(msg, senderId, newTotalBeers, newStreak);
 
         } catch (err) {
             console.error('Unhandled exception in message processing pipeline:', err);
