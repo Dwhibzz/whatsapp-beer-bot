@@ -27,7 +27,7 @@ const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
 
 let db;
 
-// Add this at the VERY TOP of index.js (right below const db;)
+// Prevent Node crashes from unhandled errors⁠
 process.on('uncaughtException', (err) => {
     console.error('Caught unhandled exception (preventing crash):', err);
 });
