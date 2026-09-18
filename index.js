@@ -4,12 +4,16 @@ const http = require('http');
 // Railway passes PORT dynamically; default to 8080 if not set
 const PORT = process.env.PORT || 8080;
 
-http.createServer((req, res) => {
-    // Respond instantly to ANY health probe request from Railway
+// 1. Instantly respond to ALL Railway health probes to prevent "Stopping Container" restarts
+const server = http.createServer((req, res) => {
     res.writeHead(200, { 'Content-Type': 'text/plain' });
     res.end('OK');
-}).listen(PORT, '0.0.0.0', () => {
+});
+
+server.listen(PORT, '0.0.0.0', () => {
     console.log(`HTTP Health Check server running on port ${PORT}`);
+    // Boot Puppeteer ONLY after the server is safely bound and responding to probes
+    initWhatsAppClient();
 });
 
 const { Client, LocalAuth } = require('whatsapp-web.js');
@@ -22,7 +26,6 @@ const { initDb } = require('./database');
 const TARGET_GROUP_NAME = "Beers Only"; // Match your exact WhatsApp group name
 const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
 
-let beerGroupId = null;
 let db;
 
 // --- AI VISION VERIFICATION ---
@@ -99,6 +102,9 @@ function getDaysUntilNextQuarter() {
 
 // --- CARD & KICK HANDLER ---
 async function handleViolation(msg, senderId, violationType = 'STANDARD') {
+    // Obtain chat directly from the message object (Fixes Puppeteer getChatById `r: r` error)
+    const chat = await msg.getChat();
+
     if (violationType === 'NON_ALCOHOLIC_DRINK') {
         await db.run(`UPDATE users SET violations = 2, is_banned = 1 WHERE user_id = ?`, [senderId]);
 
@@ -113,7 +119,6 @@ async function handleViolation(msg, senderId, violationType = 'STANDARD') {
         );
 
         try {
-            const chat = await msg.getChat();
             await chat.removeParticipants([senderId]);
             console.log(`Straight Red: Kicked @${senderId.split('@')[0]} for soft drink post.`);
         } catch (kickErr) {
@@ -149,7 +154,6 @@ async function handleViolation(msg, senderId, violationType = 'STANDARD') {
         );
 
         try {
-            const chat = await msg.getChat();
             await chat.removeParticipants([senderId]);
             console.log(`Kicked @${senderId.split('@')[0]} from group.`);
         } catch (kickErr) {
@@ -158,297 +162,299 @@ async function handleViolation(msg, senderId, violationType = 'STANDARD') {
     }
 }
 
-// --- INITIALIZE WHATSAPP CLIENT (OPTIMIZED FOR RAILWAY PERSISTENT VOLUMES) ---
-const client = new Client({
-    authStrategy: new LocalAuth({ dataPath: '/app/.wwebjs_auth' }),
-    puppeteer: {
-        headless: 'shell',
-        executablePath: process.env.PUPPETEER_EXECUTABLE_PATH || null,
-        args: [
-            '--no-sandbox',
-            '--disable-setuid-sandbox',
-            '--disable-dev-shm-usage',
-            '--disable-accelerated-2d-canvas',
-            '--no-first-run',
-            '--no-zygote',
-            '--disable-gpu',
-            '--disable-extensions',
-            '--disable-component-update',
-            '--disable-background-networking',
-            '--disable-sync',
-            '--disable-translate',
-            '--disable-site-isolation-trials',
-            '--metrics-recording-only',
-            '--mute-audio',
-            '--no-default-browser-check',
-            '--disk-cache-size=1',
-            '--media-cache-size=1',
-            '--js-flags=--expose-gc --max-old-space-size=256'
-        ]
-    }
-});
+// --- INITIALIZE WHATSAPP CLIENT ---
+function initWhatsAppClient() {
+    const client = new Client({
+        authStrategy: new LocalAuth({ dataPath: '/app/.wwebjs_auth' }),
+        puppeteer: {
+            headless: 'shell',
+            executablePath: process.env.PUPPETEER_EXECUTABLE_PATH || null,
+            args: [
+                '--no-sandbox',
+                '--disable-setuid-sandbox',
+                '--disable-dev-shm-usage',
+                '--disable-accelerated-2d-canvas',
+                '--no-first-run',
+                '--no-zygote',
+                '--disable-gpu',
+                '--disable-extensions',
+                '--disable-component-update',
+                '--disable-background-networking',
+                '--disable-sync',
+                '--disable-translate',
+                '--disable-site-isolation-trials',
+                '--metrics-recording-only',
+                '--mute-audio',
+                '--no-default-browser-check',
+                '--disk-cache-size=1',
+                '--media-cache-size=1',
+                '--js-flags=--expose-gc --max-old-space-size=256'
+            ]
+        }
+    });
 
-client.on('qr', (qr) => {
-    console.log('Scan this QR code using your secondary WhatsApp number:');
-    qrcode.generate(qr, { small: true });
-});
+    client.on('qr', (qr) => {
+        console.log('Scan this QR code using your secondary WhatsApp number:');
+        qrcode.generate(qr, { small: true });
+    });
 
-client.on('ready', async () => {
-    console.log('🍺 Beer Bot is online!');
-    db = await initDb();
+    client.on('ready', async () => {
+        console.log('🍺 Beer Bot is online!');
+        db = await initDb();
 
-    // Periodic RAM Sanitation Guard (Runs every 15 minutes)
-    setInterval(async () => {
-        if (client.pupPage) {
+        // Periodic RAM Sanitation Guard (Runs every 15 minutes)
+        setInterval(async () => {
+            if (client.pupPage) {
+                try {
+                    const devTools = await client.pupPage.target().createCDPSession();
+                    await devTools.send('Network.clearBrowserCache');
+                    await devTools.detach();
+                } catch (e) {}
+            }
+            if (global.gc) global.gc();
+        }, 15 * 60 * 1000);
+
+        // CRON 1: Weekly Sunday 8:00 PM UK Report
+        cron.schedule('0 20 * * 0', async () => {
             try {
-                const devTools = await client.pupPage.target().createCDPSession();
-                await devTools.send('Network.clearBrowserCache');
-                await devTools.detach();
-            } catch (e) {}
-        }
-        if (global.gc) global.gc();
-    }, 15 * 60 * 1000);
+                const chats = await client.getChats();
+                const targetChat = chats.find(c => c.isGroup && c.name === TARGET_GROUP_NAME);
+                if (!targetChat) return;
 
-    // CRON 1: Weekly Sunday 8:00 PM UK Report
-    cron.schedule('0 20 * * 0', async () => {
-        try {
-            const chats = await client.getChats();
-            const targetChat = chats.find(c => c.isGroup && c.name === TARGET_GROUP_NAME);
-            if (!targetChat) return;
+                const totalRow = await db.get(`SELECT value FROM system_stats WHERE key = 'total_beers'`);
+                const peakRow = await db.get(`SELECT value FROM system_stats WHERE key = 'peak_window_beers'`);
+                
+                const topPosters = await db.all(`SELECT * FROM users WHERE is_banned = 0 ORDER BY beer_count DESC LIMIT 5`);
+                const shamedUsers = await db.all(`SELECT * FROM users WHERE violations > 0 ORDER BY is_banned DESC, violations DESC`);
+                const daysLeft = getDaysUntilNextQuarter();
 
-            const totalRow = await db.get(`SELECT value FROM system_stats WHERE key = 'total_beers'`);
-            const peakRow = await db.get(`SELECT value FROM system_stats WHERE key = 'peak_window_beers'`);
-            
-            const topPosters = await db.all(`SELECT * FROM users WHERE is_banned = 0 ORDER BY beer_count DESC LIMIT 5`);
-            const shamedUsers = await db.all(`SELECT * FROM users WHERE violations > 0 ORDER BY is_banned DESC, violations DESC`);
-            const daysLeft = getDaysUntilNextQuarter();
+                let report = `🍺 *POST-MATCH ANALYSIS* 🍺\n\n`;
+                report += `📊 *Total Beers Uploaded:* ${totalRow ? totalRow.value : 0}\n`;
+                report += `🔥 *Weekend Bender (Thu-Sun):* ${peakRow ? peakRow.value : 0}\n\n`;
+                report += `🏆 *THE STARTING XI:*\n`;
 
-            let report = `🍺 *POST-MATCH ANALYSIS* 🍺\n\n`;
-            report += `📊 *Total Beers Uploaded:* ${totalRow ? totalRow.value : 0}\n`;
-            report += `🔥 *Weekend Bender (Thu-Sun):* ${peakRow ? peakRow.value : 0}\n\n`;
-            report += `🏆 *THE STARTING XI:*\n`;
-
-            const mentions = [];
-            topPosters.forEach((user, idx) => {
-                const medal = idx === 0 ? '🥇' : idx === 1 ? '🥈' : idx === 2 ? '🥉' : '🍻';
-                const streak = user.streak_count > 1 ? ` 🔥 ${user.streak_count}d` : '';
-                report += `${medal} ${idx + 1}. @${user.user_id.split('@')[0]} — ${user.beer_count}${streak}\n`;
-                mentions.push(user.user_id);
-            });
-
-            if (shamedUsers.length > 0) {
-                report += `\n🚨 *VAR REVIEW:*\n`;
-                shamedUsers.forEach(u => {
-                    const status = u.is_banned ? '🟥 KICKED' : '🟨 YELLOW';
-                    report += `${status} — @${u.user_id.split('@')[0]}\n`;
-                    mentions.push(u.user_id);
+                const mentions = [];
+                topPosters.forEach((user, idx) => {
+                    const medal = idx === 0 ? '🥇' : idx === 1 ? '🥈' : idx === 2 ? '🥉' : '🍻';
+                    const streak = user.streak_count > 1 ? ` 🔥 ${user.streak_count}d` : '';
+                    report += `${medal} ${idx + 1}. @${user.user_id.split('@')[0]} — ${user.beer_count}${streak}\n`;
+                    mentions.push(user.user_id);
                 });
+
+                if (shamedUsers.length > 0) {
+                    report += `\n🚨 *VAR REVIEW:*\n`;
+                    shamedUsers.forEach(u => {
+                        const status = u.is_banned ? '🟥 KICKED' : '🟨 YELLOW';
+                        report += `${status} — @${u.user_id.split('@')[0]}\n`;
+                        mentions.push(u.user_id);
+                    });
+                }
+
+                report += `\n🗓️ *${daysLeft} days* until Profile Photo Vote!\n\n`;
+                report += `Cheers and Happy Drinking! 🍻`;
+
+                await targetChat.sendMessage(report, { mentions });
+                await db.run(`UPDATE system_stats SET value = 0 WHERE key = 'peak_window_beers'`);
+                console.log('Sunday 8 PM UK report posted.');
+            } catch (err) {
+                console.error('Error executing Sunday cron job:', err);
             }
+        }, {
+            scheduled: true,
+            timezone: "Europe/London"
+        });
 
-            report += `\n🗓️ *${daysLeft} days* until Profile Photo Vote!\n\n`;
-            report += `Cheers and Happy Drinking! 🍻`;
+        // CRON 2: Quarterly Profile Photo Vote Announcement
+        cron.schedule('0 9 1 1,4,7,10 *', async () => {
+            try {
+                const chats = await client.getChats();
+                const targetChat = chats.find(c => c.isGroup && c.name === TARGET_GROUP_NAME);
+                if (!targetChat) return;
 
-            await targetChat.sendMessage(report, { mentions });
-            await db.run(`UPDATE system_stats SET value = 0 WHERE key = 'peak_window_beers'`);
-            console.log('Sunday 8 PM UK report posted.');
-        } catch (err) {
-            console.error('Error executing Sunday cron job:', err);
-        }
-    }, {
-        scheduled: true,
-        timezone: "Europe/London"
+                const admins = targetChat.participants.filter(p => p.isAdmin || p.isSuperAdmin);
+                const adminMentions = admins.map(a => a.id._serialized);
+
+                let pollAlert = `🗳️ *PROFILE PHOTO VOTE IS LIVE!* 🗳️\n\n`;
+                pollAlert += `It is officially time to vote for the new group profile photo!\n\n`;
+                pollAlert += `Admins pinged: `;
+                
+                adminMentions.forEach(id => {
+                    pollAlert += `@${id.split('@')[0]} `;
+                });
+                
+                pollAlert += `\n\nPlease wait for the poll to be posted by the admins! 🍻`;
+
+                await targetChat.sendMessage(pollAlert, { mentions: adminMentions });
+                console.log('Quarterly poll vote announcement posted and admins tagged.');
+            } catch (err) {
+                console.error('Error executing Quarterly Poll cron job:', err);
+            }
+        }, {
+            scheduled: true,
+            timezone: "Europe/London"
+        });
     });
 
-    // CRON 2: Quarterly Profile Photo Vote Announcement
-    cron.schedule('0 9 1 1,4,7,10 *', async () => {
+    // --- MESSAGE PROCESSING & RULE ENFORCEMENT ---
+    client.on('message', async (msg) => {
         try {
-            const chats = await client.getChats();
-            const targetChat = chats.find(c => c.isGroup && c.name === TARGET_GROUP_NAME);
-            if (!targetChat) return;
+            const chat = await msg.getChat();
 
-            const admins = targetChat.participants.filter(p => p.isAdmin || p.isSuperAdmin);
-            const adminMentions = admins.map(a => a.id._serialized);
+            // Dynamic Group Match - ignores messages outside the specified group
+            if (!chat.isGroup || chat.name !== TARGET_GROUP_NAME) return;
 
-            let pollAlert = `🗳️ *PROFILE PHOTO VOTE IS LIVE!* 🗳️\n\n`;
-            pollAlert += `It is officially time to vote for the new group profile photo!\n\n`;
-            pollAlert += `Admins pinged: `;
-            
-            adminMentions.forEach(id => {
-                pollAlert += `@${id.split('@')[0]} `;
-            });
-            
-            pollAlert += `\n\nPlease wait for the poll to be posted by the admins! 🍻`;
+            const senderId = msg.author || msg.from;
 
-            await targetChat.sendMessage(pollAlert, { mentions: adminMentions });
-            console.log('Quarterly poll vote announcement posted and admins tagged.');
-        } catch (err) {
-            console.error('Error executing Quarterly Poll cron job:', err);
-        }
-    }, {
-        scheduled: true,
-        timezone: "Europe/London"
-    });
-});
+            // Admin Detection
+            const isGroupAdmin = chat.participants.some(
+                p => p.id._serialized === senderId && (p.isAdmin || p.isSuperAdmin)
+            );
 
-// --- MESSAGE PROCESSING & RULE ENFORCEMENT ---
-client.on('message', async (msg) => {
-    try {
-        const chat = await msg.getChat();
+            // --- ADMIN COMMANDS ---
+            if (msg.body.startsWith('!revert') || msg.body.startsWith('!var')) {
+                if (!isGroupAdmin) return;
+                
+                const mentionedContacts = await msg.getMentions();
+                if (mentionedContacts.length === 0) {
+                    await msg.reply('⚠️ Please mention the user to revert! Example: `!revert @user`');
+                    return;
+                }
 
-        // Dynamic Group Match - ignores messages outside the specified group
-        if (!chat.isGroup || chat.name !== TARGET_GROUP_NAME) return;
+                const targetId = mentionedContacts[0].id._serialized;
+                const user = await db.get(`SELECT * FROM users WHERE user_id = ?`, [targetId]);
 
-        const senderId = msg.author || msg.from;
+                if (!user || user.violations === 0) {
+                    await msg.reply(`@${targetId.split('@')[0]} has a clean record! No penalties to revert.`, null, { mentions: [targetId] });
+                    return;
+                }
 
-        // Admin Detection
-        const isGroupAdmin = chat.participants.some(
-            p => p.id._serialized === senderId && (p.isAdmin || p.isSuperAdmin)
-        );
+                const newViolations = Math.max(0, user.violations - 1);
+                const newBanStatus = newViolations >= 2 ? 1 : 0;
 
-        // --- ADMIN COMMANDS ---
-        if (msg.body.startsWith('!revert') || msg.body.startsWith('!var')) {
-            if (!isGroupAdmin) return;
-            
-            const mentionedContacts = await msg.getMentions();
-            if (mentionedContacts.length === 0) {
-                await msg.reply('⚠️ Please mention the user to revert! Example: `!revert @user`');
+                await db.run(
+                    `UPDATE users SET violations = ?, is_banned = ? WHERE user_id = ?`,
+                    [newViolations, newBanStatus, targetId]
+                );
+
+                const statusText = newViolations === 0 
+                    ? '🟢 Clean Record (0 Cards)' 
+                    : '🟨 Downgraded to 1 Yellow Card';
+
+                await msg.reply(
+                    `📺 *VAR: DECISION RESCINDED*\n\n` +
+                    `The card issued to @${targetId.split('@')[0]} has been *CANCELLED*!\n\n` +
+                    `Status: ${statusText}\n\n` +
+                    `Cheers! 🍻`,
+                    null,
+                    { mentions: [targetId] }
+                );
                 return;
             }
 
-            const targetId = mentionedContacts[0].id._serialized;
-            const user = await db.get(`SELECT * FROM users WHERE user_id = ?`, [targetId]);
+            if (msg.body.startsWith('!red') || msg.body.startsWith('!straightred')) {
+                if (!isGroupAdmin) return;
 
-            if (!user || user.violations === 0) {
-                await msg.reply(`@${targetId.split('@')[0]} has a clean record! No penalties to revert.`, null, { mentions: [targetId] });
+                const mentionedContacts = await msg.getMentions();
+                if (mentionedContacts.length === 0) {
+                    await msg.reply('⚠️ Please mention the user to red card! Example: `!red @user`');
+                    return;
+                }
+
+                const targetId = mentionedContacts[0].id._serialized;
+                await db.run(`UPDATE users SET violations = 2, is_banned = 1 WHERE user_id = ?`, [targetId]);
+
+                await msg.reply(
+                    `划分划划划划划划\n` +
+                    `*VAR: STRAIGHT RED* 🟥\n` +
+                    `劃劃劃劃劃劃劃劃\n\n` +
+                    `@${targetId.split('@')[0]} has been issued a *STRAIGHT RED CARD* by the admin!\n\n` +
+                    `*KICKED FROM THE GROUP!* 🚪💥`,
+                    null,
+                    { mentions: [targetId] }
+                );
+
+                try {
+                    await chat.removeParticipants([targetId]);
+                } catch (kickErr) {
+                    console.error(`Failed to kick @${targetId.split('@')[0]}:`, kickErr);
+                }
                 return;
             }
 
-            const newViolations = Math.max(0, user.violations - 1);
-            const newBanStatus = newViolations >= 2 ? 1 : 0;
+            // Skip rule checks for admins so they aren't penalized
+            if (isGroupAdmin) return;
+
+            // Skip regular chat messages (only evaluate image/media posts)
+            if (!msg.hasMedia || (msg.type !== 'image' && msg.type !== 'sticker')) {
+                return;
+            }
+
+            // Fetch / Register User
+            const userName = msg._data?.notifyName || 'Unknown User';
+            let user = await db.get(`SELECT * FROM users WHERE user_id = ?`, [senderId]);
+            if (!user) {
+                await db.run(`INSERT INTO users (user_id, name) VALUES (?, ?)`, [senderId, userName]);
+                user = await db.get(`SELECT * FROM users WHERE user_id = ?`, [senderId]);
+            }
+
+            let media;
+            try {
+                media = await msg.downloadMedia();
+            } catch (downloadErr) {
+                console.error('Failed to download media buffer:', downloadErr.message);
+                return;
+            }
+
+            if (!media || !media.data) return;
+
+            // Verify image with Gemini AI
+            const imageCheckResult = await verifyBeerImage(media.data, media.mimetype);
+
+            // Immediate RAM Purge
+            media = null;
+            if (global.gc) global.gc();
+
+            if (imageCheckResult === 'NON_ALCOHOLIC_DRINK') {
+                await handleViolation(msg, senderId, 'NON_ALCOHOLIC_DRINK');
+                return;
+            }
+
+            if (imageCheckResult === 'INVALID') {
+                await handleViolation(msg, senderId, 'STANDARD');
+                return;
+            }
+
+            // Valid Beer Post - Track Streak and Stats
+            const todayStr = new Date().toLocaleDateString("en-CA", { timeZone: "Europe/London" });
+            const yesterday = new Date();
+            yesterday.setDate(yesterday.getDate() - 1);
+            const yesterdayStr = yesterday.toLocaleDateString("en-CA", { timeZone: "Europe/London" });
+
+            let newStreak = 1;
+            if (user.last_post_date === yesterdayStr) {
+                newStreak = user.streak_count + 1;
+            } else if (user.last_post_date === todayStr) {
+                newStreak = user.streak_count;
+            }
 
             await db.run(
-                `UPDATE users SET violations = ?, is_banned = ? WHERE user_id = ?`,
-                [newViolations, newBanStatus, targetId]
+                `UPDATE users SET beer_count = beer_count + 1, streak_count = ?, last_post_date = ? WHERE user_id = ?`,
+                [newStreak, todayStr, senderId]
             );
 
-            const statusText = newViolations === 0 
-                ? '🟢 Clean Record (0 Cards)' 
-                : '🟨 Downgraded to 1 Yellow Card';
+            await db.run(`UPDATE system_stats SET value = value + 1 WHERE key = 'total_beers'`);
 
-            await msg.reply(
-                `📺 *VAR: DECISION RESCINDED*\n\n` +
-                `The card issued to @${targetId.split('@')[0]} has been *CANCELLED*!\n\n` +
-                `Status: ${statusText}\n\n` +
-                `Cheers! 🍻`,
-                null,
-                { mentions: [targetId] }
-            );
-            return;
-        }
-
-        if (msg.body.startsWith('!red') || msg.body.startsWith('!straightred')) {
-            if (!isGroupAdmin) return;
-
-            const mentionedContacts = await msg.getMentions();
-            if (mentionedContacts.length === 0) {
-                await msg.reply('⚠️ Please mention the user to red card! Example: `!red @user`');
-                return;
+            if (isPeakWindow()) {
+                await db.run(`UPDATE system_stats SET value = value + 1 WHERE key = 'peak_window_beers'`);
             }
 
-            const targetId = mentionedContacts[0].id._serialized;
-            await db.run(`UPDATE users SET violations = 2, is_banned = 1 WHERE user_id = ?`, [targetId]);
+            console.log(`Verified beer post from ${userName} (Streak: ${newStreak}d)`);
 
-            await msg.reply(
-                `🟥🟥🟥🟥🟥🟥🟥🟥\n` +
-                `*VAR: STRAIGHT RED* 🟥\n` +
-                `🟥🟥🟥🟥🟥🟥🟥🟥\n\n` +
-                `@${targetId.split('@')[0]} has been issued a *STRAIGHT RED CARD* by the admin!\n\n` +
-                `*KICKED FROM THE GROUP!* 🚪💥`,
-                null,
-                { mentions: [targetId] }
-            );
-
-            try {
-                await chat.removeParticipants([targetId]);
-            } catch (kickErr) {
-                console.error(`Failed to kick @${targetId.split('@')[0]}:`, kickErr);
-            }
-            return;
+        } catch (err) {
+            console.error('Unhandled exception in message processing pipeline:', err);
+            if (global.gc) global.gc();
         }
+    });
 
-        // Skip rule checks for admins so they aren't penalized
-        if (isGroupAdmin) return;
-
-        // Skip regular chat messages (only evaluate image/media posts)
-        if (!msg.hasMedia || (msg.type !== 'image' && msg.type !== 'sticker')) {
-            return;
-        }
-
-        // Fetch / Register User
-        const userName = msg._data?.notifyName || 'Unknown User';
-        let user = await db.get(`SELECT * FROM users WHERE user_id = ?`, [senderId]);
-        if (!user) {
-            await db.run(`INSERT INTO users (user_id, name) VALUES (?, ?)`, [senderId, userName]);
-            user = await db.get(`SELECT * FROM users WHERE user_id = ?`, [senderId]);
-        }
-
-        let media;
-        try {
-            media = await msg.downloadMedia();
-        } catch (downloadErr) {
-            console.error('Failed to download media buffer:', downloadErr.message);
-            return;
-        }
-
-        if (!media || !media.data) return;
-
-        // Verify image with Gemini AI
-        const imageCheckResult = await verifyBeerImage(media.data, media.mimetype);
-
-        // Immediate RAM Purge
-        media = null;
-        if (global.gc) global.gc();
-
-        if (imageCheckResult === 'NON_ALCOHOLIC_DRINK') {
-            await handleViolation(msg, senderId, 'NON_ALCOHOLIC_DRINK');
-            return;
-        }
-
-        if (imageCheckResult === 'INVALID') {
-            await handleViolation(msg, senderId, 'STANDARD');
-            return;
-        }
-
-        // Valid Beer Post - Track Streak and Stats
-        const todayStr = new Date().toLocaleDateString("en-CA", { timeZone: "Europe/London" });
-        const yesterday = new Date();
-        yesterday.setDate(yesterday.getDate() - 1);
-        const yesterdayStr = yesterday.toLocaleDateString("en-CA", { timeZone: "Europe/London" });
-
-        let newStreak = 1;
-        if (user.last_post_date === yesterdayStr) {
-            newStreak = user.streak_count + 1;
-        } else if (user.last_post_date === todayStr) {
-            newStreak = user.streak_count;
-        }
-
-        await db.run(
-            `UPDATE users SET beer_count = beer_count + 1, streak_count = ?, last_post_date = ? WHERE user_id = ?`,
-            [newStreak, todayStr, senderId]
-        );
-
-        await db.run(`UPDATE system_stats SET value = value + 1 WHERE key = 'total_beers'`);
-
-        if (isPeakWindow()) {
-            await db.run(`UPDATE system_stats SET value = value + 1 WHERE key = 'peak_window_beers'`);
-        }
-
-        console.log(`Verified beer post from ${userName} (Streak: ${newStreak}d)`);
-
-    } catch (err) {
-        console.error('Unhandled exception in message processing pipeline:', err);
-        if (global.gc) global.gc();
-    }
-});
-
-client.initialize();
+    client.initialize();
+}
