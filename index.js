@@ -27,6 +27,15 @@ const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
 
 let db;
 
+// Add this at the VERY TOP of index.js (right below const db;)
+process.on('uncaughtException', (err) => {
+    console.error('Caught unhandled exception (preventing crash):', err);
+});
+
+process.on('unhandledRejection', (reason, promise) => {
+    console.error('Unhandled Rejection at:', promise, 'reason:', reason);
+});
+
 // --- AI VISION VERIFICATION ---
 async function verifyBeerImage(base64Data, mimeType) {
     try {
