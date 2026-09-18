@@ -202,6 +202,23 @@ function initWhatsAppClient() {
         console.log('🍺 Beer Bot is online!');
         db = await initDb();
 
+        // --- GROUP AUDIT CHECK ---
+        try {
+            const chats = await client.getChats();
+            const groupChats = chats.filter(c => c.isGroup);
+            const targetGroup = groupChats.find(c => c.name === TARGET_GROUP_NAME);
+
+            console.log(`📋 Total group chats found: ${groupChats.length}`);
+            if (targetGroup) {
+                console.log(`✅ SUCCESSFULLY CONNECTED to group: "${targetGroup.name}" (ID: ${targetGroup.id._serialized})`);
+            } else {
+                console.log(`⚠️ WARNING: Could not find group "${TARGET_GROUP_NAME}". Available groups:`, groupChats.map(g => g.name));
+            }
+        } catch (err) {
+            console.error('Error fetching group chats on startup:', err.message);
+        }
+        // -------------------------
+
         // Periodic RAM Sanitation Guard (Runs every 15 minutes)
         setInterval(async () => {
             if (client.pupPage) {
