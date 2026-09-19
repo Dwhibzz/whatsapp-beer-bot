@@ -388,8 +388,10 @@ function initWhatsAppClient() {
     });
 
     // --- MESSAGE PROCESSING & RULE ENFORCEMENT ---
-    client.on('message_create', async (msg) => {
+    client.on('message', async (msg) => {
         try {
+            console.log(`📩 Message received from: ${msg.from} | Media: ${msg.hasMedia}`);
+
             if (!msg.from.endsWith('@g.us')) return;
 
             let chat;
@@ -414,6 +416,24 @@ function initWhatsAppClient() {
             ) : false;
 
             // --- ADMIN COMMANDS ---
+            if (msg.body === '!status' || msg.body === '!ping') {
+                if (!isGroupAdmin) return;
+
+                const user = await db.get(`SELECT * FROM users WHERE user_id = ?`, [senderId]);
+                const beerCount = user ? user.beer_count : 0;
+                const streak = user ? user.streak_count : 0;
+
+                await msg.reply(
+                    `🤖 *BOT STATUS: ONLINE* 🟢\n\n` +
+                    `• Database: Connected\n` +
+                    `• Group: ${chat.name}\n` +
+                    `• Your Logged Beers: ${beerCount}\n` +
+                    `• Your Current Streak: ${streak}d\n\n` +
+                    `All systems operational! 🍻`
+                );
+                return;
+            }
+
             if (msg.body.startsWith('!revert') || msg.body.startsWith('!var')) {
                 if (!isGroupAdmin) return;
                 
