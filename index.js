@@ -22,12 +22,12 @@ const { GoogleGenAI } = require('@google/genai');
 const { initDb } = require('./database');
 
 // --- CONFIGURATION ---
-const TARGET_GROUP_NAME = "Beers Only"; // Match your exact WhatsApp group name
+const TARGET_GROUP_NAME = "Beers Only"; // Target WhatsApp group name
 const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
 
 let db;
 
-// Prevent Node crashes from unhandled errors⁠
+// Prevent Node crashes from unhandled errors
 process.on('uncaughtException', (err) => {
     console.error('Caught unhandled exception (preventing crash):', err);
 });
@@ -246,7 +246,7 @@ function initWhatsAppClient() {
         setTimeout(async () => {
             try {
                 const chats = await client.getChats();
-                const targetGroup = chats.find(c => c.isGroup && c.name === TARGET_GROUP_NAME);
+                const targetGroup = chats.find(c => c.isGroup && c.name.toLowerCase().trim() === TARGET_GROUP_NAME.toLowerCase().trim());
 
                 if (targetGroup) {
                     console.log(`✅ CONNECTED: Target group "${targetGroup.name}" is active.`);
@@ -283,11 +283,11 @@ function initWhatsAppClient() {
             if (global.gc) global.gc();
         }, 15 * 60 * 1000);
 
-        // CRON 1: Weekly Sunday 8:00 PM UK Report (Option 1: Classic Spaced)
+        // CRON 1: Weekly Sunday 8:00 PM UK Report
         cron.schedule('0 20 * * 0', async () => {
             try {
                 const chats = await client.getChats();
-                const targetChat = chats.find(c => c.isGroup && c.name === TARGET_GROUP_NAME);
+                const targetChat = chats.find(c => c.isGroup && c.name.toLowerCase().trim() === TARGET_GROUP_NAME.toLowerCase().trim());
                 if (!targetChat) return;
 
                 // Auto-Pardon Check
@@ -340,7 +340,7 @@ function initWhatsAppClient() {
 
                 await targetChat.sendMessage(report, { mentions });
                 await db.run(`UPDATE system_stats SET value = 0 WHERE key = 'peak_window_beers'`);
-                console.log('Sunday 8 PM UK report posted (Option 1).');
+                console.log('Sunday 8 PM UK report posted.');
             } catch (err) {
                 console.error('Error executing Sunday cron job:', err);
             }
@@ -353,7 +353,7 @@ function initWhatsAppClient() {
         cron.schedule('0 9 1 1,4,7,10 *', async () => {
             try {
                 const chats = await client.getChats();
-                const targetChat = chats.find(c => c.isGroup && c.name === TARGET_GROUP_NAME);
+                const targetChat = chats.find(c => c.isGroup && c.name.toLowerCase().trim() === TARGET_GROUP_NAME.toLowerCase().trim());
                 if (!targetChat) return;
 
                 const admins = targetChat.participants.filter(p => p.isAdmin || p.isSuperAdmin);
@@ -381,7 +381,7 @@ function initWhatsAppClient() {
     });
 
     // --- MESSAGE PROCESSING & RULE ENFORCEMENT ---
-    client.on('message', async (msg) => {
+    client.on('message_create', async (msg) => {
         try {
             if (!msg.from.endsWith('@g.us')) return;
 
@@ -392,7 +392,13 @@ function initWhatsAppClient() {
                 return;
             }
 
-            if (!chat || !chat.isGroup || chat.name !== TARGET_GROUP_NAME) return;
+            if (!chat || !chat.isGroup) return;
+
+            // Debug logger: prints every group message to verify real-time connection
+            console.log(`💬 Group message in [${chat.name}]: ${msg.body || '[Media]'}`);
+
+            // Case-insensitive & trimmed group name comparison
+            if (chat.name.toLowerCase().trim() !== TARGET_GROUP_NAME.toLowerCase().trim()) return;
 
             const senderId = msg.author || msg.from;
 
@@ -477,6 +483,8 @@ function initWhatsAppClient() {
                 return;
             }
 
+            console.log(`📸 Image received in ${chat.name} from ${senderId.split('@')[0]}. Processing media...`);
+
             const userName = msg._data?.notifyName || 'Unknown User';
             let user = await db.get(`SELECT * FROM users WHERE user_id = ?`, [senderId]);
             if (!user) {
@@ -535,7 +543,7 @@ function initWhatsAppClient() {
                 await db.run(`UPDATE system_stats SET value = value + 1 WHERE key = 'peak_window_beers'`);
             }
 
-            console.log(`Verified beer post from ${userName} (Streak: ${newStreak}d)`);
+            console.log(`✅ Verified beer post from ${userName} (Streak: ${newStreak}d)`);
 
             // Evaluate Achievement Milestones
             await checkAchievements(msg, senderId, newTotalBeers, newStreak);
