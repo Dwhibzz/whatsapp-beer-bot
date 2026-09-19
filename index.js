@@ -109,7 +109,12 @@ function getDaysUntilNextQuarter() {
 }
 
 // --- CARD & KICK HANDLER ---
-async function handleViolation(msg, senderId, violationType = 'STANDARD') {
+async function handleViolation(msg, senderId, violationType = 'STANDARD', isGroupAdmin = false) {
+    if (isGroupAdmin) {
+        console.log(`🛡️ Admin ${senderId.split('@')[0]} posted non-beer content (${violationType}), but admins are immune to VAR penalties.`);
+        return;
+    }
+
     let chat;
     try {
         chat = await msg.getChat();
@@ -221,6 +226,8 @@ function initWhatsAppClient() {
                 '--disable-extensions',
                 '--disable-component-update',
                 '--disable-background-networking',
+                '--disable-background-timer-throttling',
+                '--disable-renderer-backgrounding',
                 '--disable-sync',
                 '--disable-translate',
                 '--disable-site-isolation-trials',
@@ -394,7 +401,7 @@ function initWhatsAppClient() {
 
             if (!chat || !chat.isGroup) return;
 
-            // Debug logger: prints every group message to verify real-time connection
+            // Global Debug Logger: prints every single group message to verify active socket connection
             console.log(`💬 Group message in [${chat.name}]: ${msg.body || '[Media]'}`);
 
             // Case-insensitive & trimmed group name comparison
@@ -477,8 +484,7 @@ function initWhatsAppClient() {
                 return;
             }
 
-            if (isGroupAdmin) return;
-
+            // Ignore messages without media (photos/stickers)
             if (!msg.hasMedia || (msg.type !== 'image' && msg.type !== 'sticker')) {
                 return;
             }
@@ -508,20 +514,22 @@ function initWhatsAppClient() {
             if (global.gc) global.gc();
 
             if (imageCheckResult === 'NON_ALCOHOLIC_DRINK') {
-                await handleViolation(msg, senderId, 'NON_ALCOHOLIC_DRINK');
+                await handleViolation(msg, senderId, 'NON_ALCOHOLIC_DRINK', isGroupAdmin);
                 return;
             }
 
             if (imageCheckResult === 'INVALID') {
-                await handleViolation(msg, senderId, 'STANDARD');
+                await handleViolation(msg, senderId, 'STANDARD', isGroupAdmin);
                 return;
             }
 
             // Valid Beer Post - Track Streak and Stats
-            const todayStr = new Date().toLocaleDateString("en-CA", { timeZone: "Europe/London" });
-            const yesterday = new Date();
-            yesterday.setDate(yesterday.getDate() - 1);
-            const yesterdayStr = yesterday.toLocaleDateString("en-CA", { timeZone: "Europe/London" });
+            const nowUK = new Date(new Date().toLocaleString("en-US", { timeZone: "Europe/London" }));
+            const todayStr = nowUK.toLocaleDateString("en-CA"); // YYYY-MM-DD format
+
+            const yesterdayUK = new Date(nowUK);
+            yesterdayUK.setDate(yesterdayUK.getDate() - 1);
+            const yesterdayStr = yesterdayUK.toLocaleDateString("en-CA");
 
             let newStreak = 1;
             if (user.last_post_date === yesterdayStr) {
@@ -532,15 +540,23 @@ function initWhatsAppClient() {
 
             const newTotalBeers = user.beer_count + 1;
 
-            await db.run(
-                `UPDATE users SET beer_count = ?, streak_count = ?, last_post_date = ? WHERE user_id = ?`,
-                [newTotalBeers, newStreak, todayStr, senderId]
-            );
+            // Transaction Block for Atomic DB Writes
+            await db.run('BEGIN TRANSACTION');
+            try {
+                await db.run(
+                    `UPDATE users SET beer_count = ?, streak_count = ?, last_post_date = ? WHERE user_id = ?`,
+                    [newTotalBeers, newStreak, todayStr, senderId]
+                );
 
-            await db.run(`UPDATE system_stats SET value = value + 1 WHERE key = 'total_beers'`);
+                await db.run(`UPDATE system_stats SET value = value + 1 WHERE key = 'total_beers'`);
 
-            if (isPeakWindow()) {
-                await db.run(`UPDATE system_stats SET value = value + 1 WHERE key = 'peak_window_beers'`);
+                if (isPeakWindow()) {
+                    await db.run(`UPDATE system_stats SET value = value + 1 WHERE key = 'peak_window_beers'`);
+                }
+                await db.run('COMMIT');
+            } catch (dbErr) {
+                await db.run('ROLLBACK');
+                throw dbErr;
             }
 
             console.log(`✅ Verified beer post from ${userName} (Streak: ${newStreak}d)`);
