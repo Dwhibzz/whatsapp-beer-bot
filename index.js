@@ -40,38 +40,41 @@ process.on('unhandledRejection', (reason, promise) => {
 // --- AI VISION VERIFICATION ---
 async function verifyBeerImage(base64Data, mimeType) {
     try {
+        console.log('🤖 Sending image to Gemini for analysis...');
+
+        const imagePart = {
+            inlineData: {
+                data: base64Data,
+                mimeType: mimeType
+            }
+        };
+
+        const prompt = `Analyze this image strictly for a beer group chat.
+        
+        Check the following:
+        1. Is it a valid BEER (pint, beer bottle, beer can, craft ale, stout, lager, cider, pub tap, brewery flight)?
+        2. Is it a NON-ALCOHOLIC OR NON-BEER DRINK (water bottle, coffee cup, tea mug, soda can, juice box, energy drink, milk glass, wine, cocktail)?
+        
+        Reply strictly with one of these three words:
+        - 'BEER' if it is a valid beer/cider.
+        - 'NON_ALCOHOLIC_DRINK' if it is explicitly a soft drink, water, coffee, tea, juice, or non-beer beverage.
+        - 'INVALID' if it is a pet, meme, selfie with no drink, food plate, empty glass, or random object.`;
+
         const response = await ai.models.generateContent({
             model: 'gemini-2.5-flash',
-            contents: [
-                {
-                    inlineData: {
-                        data: base64Data,
-                        mimeType: mimeType
-                    }
-                },
-                `Analyze this image strictly for a beer group chat.
-                
-                Check the following:
-                1. Is it a valid BEER (pint, beer bottle, beer can, craft ale, stout, lager, cider, pub tap, brewery flight)?
-                2. Is it a NON-ALCOHOLIC OR NON-BEER DRINK (water bottle, coffee cup, tea mug, soda can, juice box, energy drink, milk glass, wine, cocktail)?
-                
-                Reply strictly with one of these three words:
-                - 'BEER' if it is a valid beer/cider.
-                - 'NON_ALCOHOLIC_DRINK' if it is explicitly a soft drink, water, coffee, tea, juice, or non-beer beverage.
-                - 'INVALID' if it is a pet, meme, selfie with no drink, food plate, empty glass, or random object.`
-            ]
+            contents: [imagePart, prompt]
         });
-        const text = response.text.trim().toUpperCase();
+
+        const text = response.text ? response.text.trim().toUpperCase() : '';
         
-        // --- ADDITION 3: Gemini Verdict Logging ---
         console.log(`🤖 [GEMINI VISION RESULT]: "${text}"`);
 
         if (text.includes('NON_ALCOHOLIC_DRINK')) return 'NON_ALCOHOLIC_DRINK';
         if (text.includes('BEER')) return 'BEER';
         return 'INVALID';
     } catch (err) {
-        console.error('AI Verification error (failing safe):', err);
-        return 'BEER';
+        console.error('❌ AI Verification error:', err.message || err);
+        return 'BEER'; // Fails safe so API hiccups don't kick users
     }
 }
 
@@ -111,6 +114,59 @@ function getDaysUntilNextQuarter() {
 
     const diffTime = Math.abs(nextQuarterDate - now);
     return Math.ceil(diffTime / (1000 * 60 * 60 * 24));
+}
+
+// --- HELPER TO BUILD SUNDAY REPORT ---
+async function generateSundayReport() {
+    // Auto-Pardon Check
+    const pardonedUsers = [];
+    const yellowCardUsers = await db.all(`SELECT * FROM users WHERE violations = 1 AND streak_count >= 7 AND is_banned = 0`);
+    for (const u of yellowCardUsers) {
+        await db.run(`UPDATE users SET violations = 0 WHERE user_id = ?`, [u.user_id]);
+        pardonedUsers.push(u.user_id);
+    }
+
+    const totalRow = await db.get(`SELECT value FROM system_stats WHERE key = 'total_beers'`);
+    const peakRow = await db.get(`SELECT value FROM system_stats WHERE key = 'peak_window_beers'`);
+    
+    const topPosters = await db.all(`SELECT * FROM users WHERE is_banned = 0 ORDER BY beer_count DESC LIMIT 5`);
+    const shamedUsers = await db.all(`SELECT * FROM users WHERE violations > 0 ORDER BY is_banned DESC, violations DESC`);
+    const daysLeft = getDaysUntilNextQuarter();
+
+    let report = `🍺 *POST-MATCH ANALYSIS* 🍺\n\n`;
+    report += `📊 *Total Beers Uploaded:* ${totalRow ? totalRow.value : 0}\n`;
+    report += `🔥 *Weekend Bender (Thu-Sun):* ${peakRow ? peakRow.value : 0}\n\n`;
+    report += `🏆 *THE STARTING XI (TOP 5):*\n`;
+
+    const mentions = [];
+    topPosters.forEach((user, idx) => {
+        const medal = idx === 0 ? '🥇' : idx === 1 ? '🥈' : idx === 2 ? '🥉' : '🍻';
+        const streak = user.streak_count > 1 ? ` 🔥 ${user.streak_count}d` : '';
+        report += `${medal} ${idx + 1}. @${user.user_id.split('@')[0]} — ${user.beer_count} beers${streak}\n`;
+        mentions.push(user.user_id);
+    });
+
+    if (pardonedUsers.length > 0) {
+        report += `\n🧼 *VAR PARDONS (7-Day Good Behavior):*\n`;
+        pardonedUsers.forEach(id => {
+            report += `🟢 Yellow Card rescinded for @${id.split('@')[0]}\n`;
+            mentions.push(id);
+        });
+    }
+
+    if (shamedUsers.length > 0) {
+        report += `\n🚨 *VAR REVIEW:*\n`;
+        shamedUsers.forEach(u => {
+            const status = u.is_banned ? '🟥 KICKED' : '🟨 YELLOW';
+            report += `${status} — @${u.user_id.split('@')[0]}\n`;
+            mentions.push(u.user_id);
+        });
+    }
+
+    report += `\n🗓️ *${daysLeft} days* until Profile Photo Vote!\n\n`;
+    report += `Cheers and Happy Drinking! 🍻`;
+
+    return { report, mentions };
 }
 
 // --- CARD & KICK HANDLER ---
@@ -218,7 +274,7 @@ function initWhatsAppClient() {
     const client = new Client({
         authStrategy: new LocalAuth({ dataPath: '/app/.wwebjs_auth' }),
         puppeteer: {
-            headless: 'shell',
+            headless: true,
             executablePath: process.env.PUPPETEER_EXECUTABLE_PATH || null,
             args: [
                 '--no-sandbox',
@@ -227,21 +283,7 @@ function initWhatsAppClient() {
                 '--disable-accelerated-2d-canvas',
                 '--no-first-run',
                 '--no-zygote',
-                '--disable-gpu',
-                '--disable-extensions',
-                '--disable-component-update',
-                '--disable-background-networking',
-                '--disable-background-timer-throttling',
-                '--disable-renderer-backgrounding',
-                '--disable-sync',
-                '--disable-translate',
-                '--disable-site-isolation-trials',
-                '--metrics-recording-only',
-                '--mute-audio',
-                '--no-default-browser-check',
-                '--disk-cache-size=1',
-                '--media-cache-size=1',
-                '--js-flags=--expose-gc --max-old-space-size=256'
+                '--disable-gpu'
             ]
         }
     });
@@ -270,7 +312,7 @@ function initWhatsAppClient() {
             }
         }, 10000);
 
-        // --- ADDITION 1: Error-proof Daily Database Backup Cron ---
+        // Daily Database Backup Cron
         cron.schedule('0 0 * * *', async () => {
             try {
                 const backupPath = '/app/.wwebjs_auth/beerbot_backup.db';
@@ -287,15 +329,13 @@ function initWhatsAppClient() {
             timezone: "Europe/London"
         });
 
-        // --- ADDITION 2: WebSocket Socket Heartbeat Keep-Alive (Runs every 5 mins) ---
+        // WebSocket Socket Heartbeat Keep-Alive (Runs every 5 mins)
         setInterval(async () => {
             try {
                 if (client && client.pupPage) {
                     await client.pupPage.evaluate(() => window.WWebJS?.sendPresenceAvailable?.());
                 }
-            } catch (e) {
-                // Silent catch for background heartbeat
-            }
+            } catch (e) {}
         }, 5 * 60 * 1000);
 
         // Periodic RAM Sanitation Guard (Every 15 minutes)
@@ -317,57 +357,11 @@ function initWhatsAppClient() {
                 const targetChat = chats.find(c => c.isGroup && c.name.toLowerCase().trim() === TARGET_GROUP_NAME.toLowerCase().trim());
                 if (!targetChat) return;
 
-                // Auto-Pardon Check
-                const pardonedUsers = [];
-                const yellowCardUsers = await db.all(`SELECT * FROM users WHERE violations = 1 AND streak_count >= 7 AND is_banned = 0`);
-                for (const u of yellowCardUsers) {
-                    await db.run(`UPDATE users SET violations = 0 WHERE user_id = ?`, [u.user_id]);
-                    pardonedUsers.push(u.user_id);
-                }
-
-                const totalRow = await db.get(`SELECT value FROM system_stats WHERE key = 'total_beers'`);
-                const peakRow = await db.get(`SELECT value FROM system_stats WHERE key = 'peak_window_beers'`);
-                
-                const topPosters = await db.all(`SELECT * FROM users WHERE is_banned = 0 ORDER BY beer_count DESC LIMIT 5`);
-                const shamedUsers = await db.all(`SELECT * FROM users WHERE violations > 0 ORDER BY is_banned DESC, violations DESC`);
-                const daysLeft = getDaysUntilNextQuarter();
-
-                let report = `🍺 *POST-MATCH ANALYSIS* 🍺\n\n`;
-                report += `📊 *Total Beers Uploaded:* ${totalRow ? totalRow.value : 0}\n`;
-                report += `🔥 *Weekend Bender (Thu-Sun):* ${peakRow ? peakRow.value : 0}\n\n`;
-                report += `🏆 *THE STARTING XI (TOP 5):*\n`;
-
-                const mentions = [];
-                topPosters.forEach((user, idx) => {
-                    const medal = idx === 0 ? '🥇' : idx === 1 ? '🥈' : idx === 2 ? '🥉' : '🍻';
-                    const streak = user.streak_count > 1 ? ` 🔥 ${user.streak_count}d` : '';
-                    report += `${medal} ${idx + 1}. @${user.user_id.split('@')[0]} — ${user.beer_count} beers${streak}\n`;
-                    mentions.push(user.user_id);
-                });
-
-                if (pardonedUsers.length > 0) {
-                    report += `\n🧼 *VAR PARDONS (7-Day Good Behavior):*\n`;
-                    pardonedUsers.forEach(id => {
-                        report += `🟢 Yellow Card rescinded for @${id.split('@')[0]}\n`;
-                        mentions.push(id);
-                    });
-                }
-
-                if (shamedUsers.length > 0) {
-                    report += `\n🚨 *VAR REVIEW:*\n`;
-                    shamedUsers.forEach(u => {
-                        const status = u.is_banned ? '🟥 KICKED' : '🟨 YELLOW';
-                        report += `${status} — @${u.user_id.split('@')[0]}\n`;
-                        mentions.push(u.user_id);
-                    });
-                }
-
-                report += `\n🗓️ *${daysLeft} days* until Profile Photo Vote!\n\n`;
-                report += `Cheers and Happy Drinking! 🍻`;
+                const { report, mentions } = await generateSundayReport();
 
                 await targetChat.sendMessage(report, { mentions });
                 await db.run(`UPDATE system_stats SET value = 0 WHERE key = 'peak_window_beers'`);
-                console.log('Sunday 8 PM UK report posted.');
+                console.log('Sunday 8 PM UK report posted successfully.');
             } catch (err) {
                 console.error('Error executing Sunday cron job:', err);
             }
@@ -426,10 +420,8 @@ function initWhatsAppClient() {
 
             if (!chat || !chat.isGroup) return;
 
-            // Global Debug Logger: prints every single group message to verify active socket connection
             console.log(`💬 Group message in [${chat.name}]: ${msg.body || '[Media]'}`);
 
-            // Case-insensitive & trimmed group name comparison
             if (chat.name.toLowerCase().trim() !== TARGET_GROUP_NAME.toLowerCase().trim()) return;
 
             const isGroupAdmin = chat.participants ? chat.participants.some(
@@ -452,6 +444,17 @@ function initWhatsAppClient() {
                     `• Your Current Streak: ${streak}d\n\n` +
                     `All systems operational! 🍻`
                 );
+                return;
+            }
+
+            // MANUAL CATCH-UP COMMAND FOR SUNDAY REPORT
+            if (msg.body === '!report' || msg.body === '!summary') {
+                if (!isGroupAdmin) return;
+
+                const { report, mentions } = await generateSundayReport();
+                await chat.sendMessage(report, { mentions });
+                await db.run(`UPDATE system_stats SET value = 0 WHERE key = 'peak_window_beers'`);
+                console.log('Manual report command executed.');
                 return;
             }
 
@@ -530,7 +533,7 @@ function initWhatsAppClient() {
                 return;
             }
 
-            console.log(`📸 Image received in ${chat.name} from @${senderNumber}. Analyzing with Gemini AI...`);
+            console.log(`📸 Image received in ${chat.name} from @${senderNumber}.`);
 
             const userName = msg._data?.notifyName || senderNumber;
             let user = await db.get(`SELECT * FROM users WHERE user_id = ?`, [senderId]);
@@ -541,15 +544,20 @@ function initWhatsAppClient() {
 
             let media;
             try {
+                console.log('⏳ Downloading media buffer...');
                 media = await msg.downloadMedia();
+                if (!media || !media.data) {
+                    console.error('❌ Downloaded media buffer was empty.');
+                    return;
+                }
+                console.log(`✅ Media downloaded (${media.data.length} bytes). Sending to Gemini...`);
             } catch (downloadErr) {
-                console.error(`Failed to download media buffer from @${senderNumber}:`, downloadErr.message);
+                console.error(`❌ Failed to download media buffer from @${senderNumber}:`, downloadErr.message);
                 return;
             }
 
-            if (!media || !media.data) return;
-
             const imageCheckResult = await verifyBeerImage(media.data, media.mimetype);
+            console.log(`🔍 Verdict for @${senderNumber}: ${imageCheckResult}`);
 
             media = null;
             if (global.gc) global.gc();
@@ -568,7 +576,7 @@ function initWhatsAppClient() {
 
             // Valid Beer Post - Track Streak and Stats
             const nowUK = new Date(new Date().toLocaleString("en-US", { timeZone: "Europe/London" }));
-            const todayStr = nowUK.toLocaleDateString("en-CA"); // YYYY-MM-DD format
+            const todayStr = nowUK.toLocaleDateString("en-CA");
 
             const yesterdayUK = new Date(nowUK);
             yesterdayUK.setDate(yesterdayUK.getDate() - 1);
@@ -583,8 +591,6 @@ function initWhatsAppClient() {
 
             const newTotalBeers = user.beer_count + 1;
 
-            // Transaction Block for Atomic DB Writes
-            await db.run('BEGIN TRANSACTION');
             try {
                 await db.run(
                     `UPDATE users SET beer_count = ?, streak_count = ?, last_post_date = ? WHERE user_id = ?`,
@@ -596,20 +602,19 @@ function initWhatsAppClient() {
                 if (isPeakWindow()) {
                     await db.run(`UPDATE system_stats SET value = value + 1 WHERE key = 'peak_window_beers'`);
                 }
-                await db.run('COMMIT');
             } catch (dbErr) {
-                await db.run('ROLLBACK');
-                throw dbErr;
+                console.error('❌ Database update error:', dbErr);
             }
 
-            // --- 🍺 EMOJI REACTION ON SUCCESSFUL BEER VERIFICATION ---
+            // --- 🍺 EMOJI REACTION (SILENT RAILWAY LOGGING ONLY) ---
             try {
                 await msg.react('🍺');
+                console.log(`✅ Successfully reacted with 🍺 to @${senderNumber}`);
             } catch (reactErr) {
-                console.error('Failed to place beer reaction on message:', reactErr.message);
+                console.error(`⚠️ Could not place emoji reaction for @${senderNumber}:`, reactErr.message);
             }
 
-            console.log(`✅ SUCCESS: Verified beer from ${userName} (@${senderNumber}) | Total Beers: ${newTotalBeers} | Streak: ${newStreak}d`);
+            console.log(`✅ SUCCESS: Verified beer from ${userName} (@${senderNumber}) | Total: ${newTotalBeers} | Streak: ${newStreak}d`);
 
             // Evaluate Achievement Milestones
             await checkAchievements(msg, senderId, newTotalBeers, newStreak);
