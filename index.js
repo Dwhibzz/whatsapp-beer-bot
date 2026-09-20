@@ -1,5 +1,6 @@
 // index.js
 const http = require('http');
+const fs = require('fs');
 
 // Railway passes PORT dynamically; default to 8080 if not set
 const PORT = process.env.PORT || 8080;
@@ -61,6 +62,10 @@ async function verifyBeerImage(base64Data, mimeType) {
             ]
         });
         const text = response.text.trim().toUpperCase();
+        
+        // --- ADDITION 3: Gemini Verdict Logging ---
+        console.log(`🤖 [GEMINI VISION RESULT]: "${text}"`);
+
         if (text.includes('NON_ALCOHOLIC_DRINK')) return 'NON_ALCOHOLIC_DRINK';
         if (text.includes('BEER')) return 'BEER';
         return 'INVALID';
@@ -265,11 +270,15 @@ function initWhatsAppClient() {
             }
         }, 10000);
 
-        // Daily Database Backup Cron (Midnight UK time)
+        // --- ADDITION 1: Error-proof Daily Database Backup Cron ---
         cron.schedule('0 0 * * *', async () => {
             try {
-                await db.run(`VACUUM INTO '/app/.wwebjs_auth/beerbot_backup.db'`);
-                console.log('📦 Daily database backup created successfully in persistent volume.');
+                const backupPath = '/app/.wwebjs_auth/beerbot_backup.db';
+                if (fs.existsSync(backupPath)) {
+                    fs.unlinkSync(backupPath);
+                }
+                await db.run(`VACUUM INTO '${backupPath}'`);
+                console.log('📦 Daily database backup refreshed successfully in persistent volume.');
             } catch (err) {
                 console.error('Failed to create daily database backup:', err);
             }
@@ -277,6 +286,17 @@ function initWhatsAppClient() {
             scheduled: true,
             timezone: "Europe/London"
         });
+
+        // --- ADDITION 2: WebSocket Socket Heartbeat Keep-Alive (Runs every 5 mins) ---
+        setInterval(async () => {
+            try {
+                if (client && client.pupPage) {
+                    await client.pupPage.evaluate(() => window.WWebJS?.sendPresenceAvailable?.());
+                }
+            } catch (e) {
+                // Silent catch for background heartbeat
+            }
+        }, 5 * 60 * 1000);
 
         // Periodic RAM Sanitation Guard (Every 15 minutes)
         setInterval(async () => {
@@ -390,7 +410,10 @@ function initWhatsAppClient() {
     // --- MESSAGE PROCESSING & RULE ENFORCEMENT ---
     client.on('message', async (msg) => {
         try {
-            console.log(`📩 Message received from: ${msg.from} | Media: ${msg.hasMedia}`);
+            const senderId = msg.author || msg.from;
+            const senderNumber = senderId.split('@')[0];
+
+            console.log(`📩 Message received from: @${senderNumber} | Group: ${msg.from} | Media: ${msg.hasMedia}`);
 
             if (!msg.from.endsWith('@g.us')) return;
 
@@ -408,8 +431,6 @@ function initWhatsAppClient() {
 
             // Case-insensitive & trimmed group name comparison
             if (chat.name.toLowerCase().trim() !== TARGET_GROUP_NAME.toLowerCase().trim()) return;
-
-            const senderId = msg.author || msg.from;
 
             const isGroupAdmin = chat.participants ? chat.participants.some(
                 p => p.id._serialized === senderId && (p.isAdmin || p.isSuperAdmin)
@@ -509,9 +530,9 @@ function initWhatsAppClient() {
                 return;
             }
 
-            console.log(`📸 Image received in ${chat.name} from ${senderId.split('@')[0]}. Processing media...`);
+            console.log(`📸 Image received in ${chat.name} from @${senderNumber}. Analyzing with Gemini AI...`);
 
-            const userName = msg._data?.notifyName || 'Unknown User';
+            const userName = msg._data?.notifyName || senderNumber;
             let user = await db.get(`SELECT * FROM users WHERE user_id = ?`, [senderId]);
             if (!user) {
                 await db.run(`INSERT INTO users (user_id, name) VALUES (?, ?)`, [senderId, userName]);
@@ -522,7 +543,7 @@ function initWhatsAppClient() {
             try {
                 media = await msg.downloadMedia();
             } catch (downloadErr) {
-                console.error('Failed to download media buffer:', downloadErr.message);
+                console.error(`Failed to download media buffer from @${senderNumber}:`, downloadErr.message);
                 return;
             }
 
@@ -534,11 +555,13 @@ function initWhatsAppClient() {
             if (global.gc) global.gc();
 
             if (imageCheckResult === 'NON_ALCOHOLIC_DRINK') {
+                console.log(`🚨 SOFT DRINK DETECTED from @${senderNumber}! Triggering VAR Red Card...`);
                 await handleViolation(msg, senderId, 'NON_ALCOHOLIC_DRINK', isGroupAdmin);
                 return;
             }
 
             if (imageCheckResult === 'INVALID') {
+                console.log(`🟨 INVALID IMAGE DETECTED from @${senderNumber}! Triggering VAR Yellow Card...`);
                 await handleViolation(msg, senderId, 'STANDARD', isGroupAdmin);
                 return;
             }
@@ -579,7 +602,7 @@ function initWhatsAppClient() {
                 throw dbErr;
             }
 
-            console.log(`✅ Verified beer post from ${userName} (Streak: ${newStreak}d)`);
+            console.log(`✅ SUCCESS: Verified beer from ${userName} (@${senderNumber}) | Total Beers: ${newTotalBeers} | Streak: ${newStreak}d`);
 
             // Evaluate Achievement Milestones
             await checkAchievements(msg, senderId, newTotalBeers, newStreak);
