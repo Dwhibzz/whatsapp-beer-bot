@@ -602,6 +602,13 @@ function initWhatsAppClient() {
                 throw dbErr;
             }
 
+            // --- 🍺 EMOJI REACTION ON SUCCESSFUL BEER VERIFICATION ---
+            try {
+                await msg.react('🍺');
+            } catch (reactErr) {
+                console.error('Failed to place beer reaction on message:', reactErr.message);
+            }
+
             console.log(`✅ SUCCESS: Verified beer from ${userName} (@${senderNumber}) | Total Beers: ${newTotalBeers} | Streak: ${newStreak}d`);
 
             // Evaluate Achievement Milestones
