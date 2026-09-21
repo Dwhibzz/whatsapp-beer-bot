@@ -136,7 +136,6 @@ function getDaysUntilNextQuarter() {
 
 // --- HELPER TO BUILD SUNDAY REPORT ---
 async function generateSundayReport() {
-    // Auto-Pardon Check
     const pardonedUsers = [];
     const yellowCardUsers = await db.all(`SELECT * FROM users WHERE violations = 1 AND streak_count >= 7 AND is_banned = 0`);
     for (const u of yellowCardUsers) {
@@ -330,7 +329,6 @@ function initWhatsAppClient() {
             }
         }, 10000);
 
-        // Daily Database Backup Cron
         cron.schedule('0 0 * * *', async () => {
             try {
                 const backupPath = '/app/.wwebjs_auth/beerbot_backup.db';
@@ -347,7 +345,6 @@ function initWhatsAppClient() {
             timezone: "Europe/London"
         });
 
-        // WebSocket Socket Heartbeat Keep-Alive (Runs every 5 mins)
         setInterval(async () => {
             try {
                 if (client && client.pupPage) {
@@ -356,7 +353,6 @@ function initWhatsAppClient() {
             } catch (e) {}
         }, 5 * 60 * 1000);
 
-        // Periodic RAM Sanitation Guard (Every 15 minutes)
         setInterval(async () => {
             if (client.pupPage) {
                 try {
@@ -368,7 +364,6 @@ function initWhatsAppClient() {
             if (global.gc) global.gc();
         }, 15 * 60 * 1000);
 
-        // CRON 1: Weekly Sunday 8:00 PM UK Report
         cron.schedule('0 20 * * 0', async () => {
             try {
                 const chats = await client.getChats();
@@ -388,7 +383,6 @@ function initWhatsAppClient() {
             timezone: "Europe/London"
         });
 
-        // CRON 2: Quarterly Profile Photo Vote Announcement
         cron.schedule('0 9 1 1,4,7,10 *', async () => {
             try {
                 const chats = await client.getChats();
@@ -422,32 +416,27 @@ function initWhatsAppClient() {
     // --- MESSAGE PROCESSING & RULE ENFORCEMENT ---
     client.on('message', async (msg) => {
         try {
-            const senderId = msg.author || msg.from;
-            const senderNumber = senderId.split('@')[0];
-
-            console.log(`📩 Message received from: @${senderNumber} | Group: ${msg.from} | Media: ${msg.hasMedia}`);
-
             if (!msg.from.endsWith('@g.us')) return;
 
             let chat;
             try {
                 chat = await msg.getChat();
             } catch (chatErr) {
+                console.error('⚠️ Could not fetch chat object:', chatErr.message);
+            }
+
+            if (chat && chat.name.toLowerCase().trim() !== TARGET_GROUP_NAME.toLowerCase().trim()) {
                 return;
             }
 
-            if (!chat || !chat.isGroup) return;
+            const senderId = msg.author || msg.from;
+            const senderNumber = senderId.split('@')[0];
 
-            console.log(`💬 Group message in [${chat.name}]: ${msg.body || '[Media]'}`);
-
-            if (chat.name.toLowerCase().trim() !== TARGET_GROUP_NAME.toLowerCase().trim()) return;
-
-            const isGroupAdmin = chat.participants ? chat.participants.some(
-                p => p.id._serialized === senderId && (p.isAdmin || p.isSuperAdmin)
-            ) : false;
-
-            // --- ADMIN COMMANDS ---
             if (msg.body === '!status' || msg.body === '!ping') {
+                const isGroupAdmin = chat && chat.participants ? chat.participants.some(
+                    p => p.id._serialized === senderId && (p.isAdmin || p.isSuperAdmin)
+                ) : false;
+
                 if (!isGroupAdmin) return;
 
                 const user = await db.get(`SELECT * FROM users WHERE user_id = ?`, [senderId]);
@@ -457,7 +446,7 @@ function initWhatsAppClient() {
                 await msg.reply(
                     `🤖 *BOT STATUS: ONLINE* 🟢\n\n` +
                     `• Database: Connected\n` +
-                    `• Group: ${chat.name}\n` +
+                    `• Group: ${chat ? chat.name : TARGET_GROUP_NAME}\n` +
                     `• Your Logged Beers: ${beerCount}\n` +
                     `• Your Current Streak: ${streak}d\n\n` +
                     `All systems operational! 🍻`
@@ -465,93 +454,32 @@ function initWhatsAppClient() {
                 return;
             }
 
-            // MANUAL CATCH-UP COMMAND FOR SUNDAY REPORT
             if (msg.body === '!report' || msg.body === '!summary') {
+                const isGroupAdmin = chat && chat.participants ? chat.participants.some(
+                    p => p.id._serialized === senderId && (p.isAdmin || p.isSuperAdmin)
+                ) : false;
+
                 if (!isGroupAdmin) return;
 
                 const { report, mentions } = await generateSundayReport();
-                await chat.sendMessage(report, { mentions });
+                if (chat) {
+                    await chat.sendMessage(report, { mentions });
+                } else {
+                    await msg.reply(report, null, { mentions });
+                }
                 await db.run(`UPDATE system_stats SET value = 0 WHERE key = 'peak_window_beers'`);
                 console.log('Manual report command executed.');
                 return;
             }
 
-            if (msg.body.startsWith('!revert') || msg.body.startsWith('!var')) {
-                if (!isGroupAdmin) return;
-                
-                const mentionedContacts = await msg.getMentions();
-                if (mentionedContacts.length === 0) {
-                    await msg.reply('⚠️ Please mention the user to revert! Example: `!revert @user`');
-                    return;
-                }
+            // Accept ALL media uploads regardless of sub-type string
+            if (!msg.hasMedia) return;
 
-                const targetId = mentionedContacts[0].id._serialized;
-                const user = await db.get(`SELECT * FROM users WHERE user_id = ?`, [targetId]);
+            console.log(`📸 Image received in ${chat ? chat.name : TARGET_GROUP_NAME} from @${senderNumber}.`);
 
-                if (!user || user.violations === 0) {
-                    await msg.reply(`@${targetId.split('@')[0]} has a clean record! No penalties to revert.`, null, { mentions: [targetId] });
-                    return;
-                }
-
-                const newViolations = Math.max(0, user.violations - 1);
-                const newBanStatus = newViolations >= 2 ? 1 : 0;
-
-                await db.run(
-                    `UPDATE users SET violations = ?, is_banned = ? WHERE user_id = ?`,
-                    [newViolations, newBanStatus, targetId]
-                );
-
-                const statusText = newViolations === 0 
-                    ? '🟢 Clean Record (0 Cards)' 
-                    : '🟨 Downgraded to 1 Yellow Card';
-
-                await msg.reply(
-                    `📺 *VAR: DECISION RESCINDED*\n\n` +
-                    `The card issued to @${targetId.split('@')[0]} has been *CANCELLED*!\n\n` +
-                    `Status: ${statusText}\n\n` +
-                    `Cheers! 🍻`,
-                    null,
-                    { mentions: [targetId] }
-                );
-                return;
-            }
-
-            if (msg.body.startsWith('!red') || msg.body.startsWith('!straightred')) {
-                if (!isGroupAdmin) return;
-
-                const mentionedContacts = await msg.getMentions();
-                if (mentionedContacts.length === 0) {
-                    await msg.reply('⚠️ Please mention the user to red card! Example: `!red @user`');
-                    return;
-                }
-
-                const targetId = mentionedContacts[0].id._serialized;
-                await db.run(`UPDATE users SET violations = 2, is_banned = 1 WHERE user_id = ?`, [targetId]);
-
-                await msg.reply(
-                    `🟥🟥🟥🟥🟥🟥🟥🟥\n` +
-                    `*VAR: STRAIGHT RED* 🟥\n` +
-                    `🟥🟥🟥🟥🟥🟥🟥🟥\n\n` +
-                    `@${targetId.split('@')[0]} has been issued a *STRAIGHT RED CARD* by the admin!\n\n` +
-                    `*KICKED FROM THE GROUP!* 🚪💥`,
-                    null,
-                    { mentions: [targetId] }
-                );
-
-                try {
-                    await chat.removeParticipants([targetId]);
-                } catch (kickErr) {
-                    console.error(`Failed to kick @${targetId.split('@')[0]}:`, kickErr);
-                }
-                return;
-            }
-
-            // Ignore messages without media (photos/stickers)
-            if (!msg.hasMedia || (msg.type !== 'image' && msg.type !== 'sticker')) {
-                return;
-            }
-
-            console.log(`📸 Image received in ${chat.name} from @${senderNumber}.`);
+            const isGroupAdmin = chat && chat.participants ? chat.participants.some(
+                p => p.id._serialized === senderId && (p.isAdmin || p.isSuperAdmin)
+            ) : false;
 
             const userName = msg._data?.notifyName || senderNumber;
             let user = await db.get(`SELECT * FROM users WHERE user_id = ?`, [senderId]);
@@ -592,7 +520,6 @@ function initWhatsAppClient() {
                 return;
             }
 
-            // Valid Beer Post - Track Streak and Stats
             const nowUK = new Date(new Date().toLocaleString("en-US", { timeZone: "Europe/London" }));
             const todayStr = nowUK.toLocaleDateString("en-CA");
 
@@ -624,7 +551,6 @@ function initWhatsAppClient() {
                 console.error('❌ Database update error:', dbErr);
             }
 
-            // --- 🍺 EMOJI REACTION (SILENT RAILWAY LOGGING ONLY) ---
             try {
                 await msg.react('🍺');
                 console.log(`✅ Successfully reacted with 🍺 to @${senderNumber}`);
@@ -634,7 +560,6 @@ function initWhatsAppClient() {
 
             console.log(`✅ SUCCESS: Verified beer from ${userName} (@${senderNumber}) | Total: ${newTotalBeers} | Streak: ${newStreak}d`);
 
-            // Evaluate Achievement Milestones
             await checkAchievements(msg, senderId, newTotalBeers, newStreak);
 
         } catch (err) {
