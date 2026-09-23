@@ -1,4 +1,3 @@
-// index.js
 const http = require('http');
 const fs = require('fs');
 
@@ -289,7 +288,7 @@ async function checkAchievements(msg, senderId, newTotalBeers, newStreak) {
 // --- INITIALIZE WHATSAPP CLIENT ---
 function initWhatsAppClient() {
     const client = new Client({
-        aauthStrategy: new LocalAuth({ dataPath: '/app/.wwebjs_auth_v2' }),
+        authStrategy: new LocalAuth({ dataPath: '/app/.wwebjs_auth_v2' }),
         puppeteer: {
             headless: true,
             executablePath: process.env.PUPPETEER_EXECUTABLE_PATH || null,
@@ -308,6 +307,11 @@ function initWhatsAppClient() {
     client.on('qr', (qr) => {
         console.log('Scan this QR code using your secondary WhatsApp number:');
         qrcode.generate(qr, { small: true });
+    });
+
+    client.on('disconnected', (reason) => {
+        console.error('❌ WhatsApp Web disconnected! Reason:', reason);
+        process.exit(1);
     });
 
     client.on('ready', async () => {
