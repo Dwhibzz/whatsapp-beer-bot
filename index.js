@@ -289,6 +289,10 @@ async function checkAchievements(msg, senderId, newTotalBeers, newStreak) {
 function initWhatsAppClient() {
     const client = new Client({
         authStrategy: new LocalAuth({ dataPath: '/app/.wwebjs_auth_v3' }),
+        webVersionCache: {
+            type: 'remote',
+            remotePath: 'https://raw.githubusercontent.com/wppconnect-team/wa-version-https/main/html/2.3000.1018949707-alpha.html',
+        },
         puppeteer: {
             headless: true,
             executablePath: process.env.PUPPETEER_EXECUTABLE_PATH || null,
