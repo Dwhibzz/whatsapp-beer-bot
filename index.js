@@ -288,7 +288,9 @@ async function checkAchievements(msg, senderId, newTotalBeers, newStreak) {
 // --- INITIALIZE WHATSAPP CLIENT ---
 function initWhatsAppClient() {
     const client = new Client({
-        authStrategy: new LocalAuth({ dataPath: '/app/.wwebjs_auth_v3' }),
+        authStrategy: new LocalAuth({ dataPath: '/app/.wwebjs_auth_v4' }),
+        syncFullHistory: false,
+        takeoverOnConflict: true,
         webVersionCache: {
             type: 'remote',
             remotePath: 'https://raw.githubusercontent.com/wppconnect-team/wa-version-https/main/html/2.3000.1018949707-alpha.html',
